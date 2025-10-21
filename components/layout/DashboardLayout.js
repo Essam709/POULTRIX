@@ -1,15 +1,101 @@
 // components/layout/DashboardLayout.js
 import React, { useContext, useState, useEffect } from 'react';
+import { useRouter } from 'next/router';
 import { useAuth } from '../../contexts/AuthContext';
 import { useApp } from '../../contexts/AppContext';
+import { firebaseService } from '../../hooks/useFirebase';
 import Header from './Header';
 import EditModeBanner from '../common/EditModeBanner';
 
 export default function DashboardLayout({ children }) {
-  const { user, logout } = useAuth();
-  const { language, setLanguage, devicesList, currentDevice, setCurrentDevice, farms, currentFarm, selectFarm } = useApp();
+  const { user, userData, logout } = useAuth();
+  const { 
+    language, 
+    setLanguage, 
+    devicesList, 
+    setDevicesList,
+    currentDevice, 
+    setCurrentDevice, 
+    farms, 
+    currentFarm, 
+    selectFarm,
+    addFarm
+  } = useApp();
+  
   const [currentTime, setCurrentTime] = useState(new Date());
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [userFarms, setUserFarms] = useState([]);
+  const [pendingDevicesCount, setPendingDevicesCount] = useState(0);
+  const router = useRouter();
+
+  // التحقق من تسجيل الدخول
+  useEffect(() => {
+    if (!user) {
+      router.push('/auth/login');
+      return;
+    }
+    setLoading(false);
+  }, [user, router]);
+
+  // تحميل أجهزة المستخدم
+  useEffect(() => {
+    if (!user) return;
+
+    const unsubscribe = firebaseService.getUserDevices(user.uid, (snapshot) => {
+      const devicesData = snapshot.val();
+      if (devicesData) {
+        const devices = Object.keys(devicesData);
+        setDevicesList(devices);
+        
+        // إذا لم يكن هناك جهاز محدد، نحدد الأول تلقائياً
+        if (!currentDevice && devices.length > 0) {
+          setCurrentDevice(devices[0]);
+        }
+      } else {
+        setDevicesList([]);
+      }
+    });
+
+    return () => unsubscribe();
+  }, [user, currentDevice, setDevicesList, setCurrentDevice]);
+
+  // تحميل عدد الأجهزة المعلقة
+  useEffect(() => {
+    if (!user) return;
+
+    const unsubscribe = firebaseService.getPendingDevicesCount((count) => {
+      setPendingDevicesCount(count);
+    });
+
+    return () => unsubscribe();
+  }, [user]);
+
+  // تحميل مزارع المستخدم
+  useEffect(() => {
+    if (!user) return;
+
+    const loadUserFarms = async () => {
+      try {
+        // استخدام الأجهزة كمزارع مباشرة
+        if (devicesList && devicesList.length > 0) {
+          setUserFarms(devicesList);
+          
+          // إذا لم يكن هناك مزرعة محددة، نحدد الأولى تلقائياً
+          if (!currentFarm && selectFarm) {
+            selectFarm(devicesList[0]);
+          }
+        } else {
+          setUserFarms([]);
+        }
+      } catch (error) {
+        console.error('Error loading farms:', error);
+        setUserFarms(devicesList || []);
+      }
+    };
+
+    loadUserFarms();
+  }, [user, devicesList, currentFarm, selectFarm]);
 
   // تحديث الوقت الحالي
   useEffect(() => {
@@ -22,6 +108,15 @@ export default function DashboardLayout({ children }) {
 
   const toggleSidebar = () => {
     setSidebarCollapsed(!sidebarCollapsed);
+  };
+
+  const handleLogout = async () => {
+    try {
+      await logout();
+      router.push('/auth/login');
+    } catch (error) {
+      console.error('Error logging out:', error);
+    }
   };
 
   const formatTime = (date) => {
@@ -45,6 +140,7 @@ export default function DashboardLayout({ children }) {
     ar: {
       dashboard: "لوحة التحكم",
       units: "الوحدات الذكية",
+      pendingDevices: "الأجهزة المعلقة",
       reports: "التقارير",
       settings: "الإعدادات",
       live: "مباشر",
@@ -55,11 +151,18 @@ export default function DashboardLayout({ children }) {
       welcome: "مرحباً",
       selectFarm: "اختر مزرعة",
       noFarms: "لا توجد مزارع",
-      toggleSidebar: "إظهار/إخفاء القائمة"
+      toggleSidebar: "إظهار/إخفاء القائمة",
+      noDevices: "لا توجد أجهزة",
+      addFirstDevice: "أضف جهازك الأول",
+      loading: "جاري التحميل...",
+      userWelcome: "أهلاً بك",
+      pendingDevicesTitle: "الأجهزة المعلقة",
+      pendingDevicesDesc: "إدارة الأجهزة المنتظرة للموافقة"
     },
     en: {
       dashboard: "Dashboard",
       units: "Smart Units",
+      pendingDevices: "Pending Devices",
       reports: "Reports",
       settings: "Settings",
       live: "Live",
@@ -70,11 +173,30 @@ export default function DashboardLayout({ children }) {
       welcome: "Welcome",
       selectFarm: "Select Farm",
       noFarms: "No farms",
-      toggleSidebar: "Show/Hide Menu"
+      toggleSidebar: "Show/Hide Menu",
+      noDevices: "No devices",
+      addFirstDevice: "Add your first device",
+      loading: "Loading...",
+      userWelcome: "Welcome back",
+      pendingDevicesTitle: "Pending Devices",
+      pendingDevicesDesc: "Manage devices waiting for approval"
     }
   };
 
   const t = translations[language];
+
+  if (loading) {
+    return (
+      <div className="loading-container">
+        <div className="loading-spinner"></div>
+        <p>{t.loading}</p>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return null; // سيتم التوجيه إلى صفحة التسجيل
+  }
 
   return (
     <div className="dashboard-layout" dir={language === 'ar' ? 'rtl' : 'ltr'}>
@@ -84,7 +206,7 @@ export default function DashboardLayout({ children }) {
           <div className="sidebar-header">
             <div className="logo">
               <i className="fas fa-tractor"></i>
-              <h2>المزرعة الذكية</h2>
+              <h2>{language === 'ar' ? 'المزرعة الذكية' : 'Smart Farm'}</h2>
             </div>
             <button className="sidebar-toggle" onClick={toggleSidebar} title={t.toggleSidebar}>
               <i className={`fas ${language === 'ar' ? 'fa-chevron-left' : 'fa-chevron-right'}`}></i>
@@ -100,6 +222,16 @@ export default function DashboardLayout({ children }) {
               <i className="fas fa-fan"></i>
               <span>{t.units}</span>
             </a>
+            
+            {/* رابط الأجهزة المعلقة */}
+            <a href="/devices/pending" className="nav-item">
+              <i className="fas fa-clock"></i>
+              <span>{t.pendingDevices}</span>
+              {pendingDevicesCount > 0 && (
+                <span className="nav-badge">{pendingDevicesCount}</span>
+              )}
+            </a>
+            
             <a href="#" className="nav-item">
               <i className="fas fa-chart-line"></i>
               <span>{t.reports}</span>
@@ -113,23 +245,33 @@ export default function DashboardLayout({ children }) {
           {/* اختيار المزرعة */}
           <div className="farm-selector-section">
             <label>{t.selectFarm}</label>
-            {farms.length > 0 ? (
+            {userFarms.length > 0 ? (
               <select 
                 value={currentFarm || ''} 
-                onChange={(e) => selectFarm(e.target.value)}
+                onChange={(e) => selectFarm && selectFarm(e.target.value)}
                 className="farm-select"
               >
                 <option value="">{t.selectFarm}</option>
-                {farms.map(farm => (
+                {userFarms.map(farm => (
                   <option key={farm} value={farm}>
                     {farm}
                   </option>
                 ))}
               </select>
             ) : (
-              <div className="no-farms-message">
+              <div className="no-data-message">
                 <i className="fas fa-info-circle"></i>
                 <span>{t.noFarms}</span>
+                <button 
+                  className="add-btn-small"
+                  onClick={() => {
+                    // فتح نافذة إضافة مزرعة
+                    const addFarmBtn = document.querySelector('.add-farm-btn');
+                    if (addFarmBtn) addFarmBtn.click();
+                  }}
+                >
+                  <i className="fas fa-plus"></i>
+                </button>
               </div>
             )}
           </div>
@@ -137,18 +279,35 @@ export default function DashboardLayout({ children }) {
           {/* اختيار الجهاز */}
           <div className="device-selector-section">
             <label>{t.selectDevice}</label>
-            <select 
-              value={currentDevice || ''} 
-              onChange={(e) => setCurrentDevice(e.target.value)}
-              className="device-select"
-            >
-              <option value="">{t.selectDevice}</option>
-              {devicesList.map(device => (
-                <option key={device} value={device}>
-                  {device}
-                </option>
-              ))}
-            </select>
+            {devicesList && devicesList.length > 0 ? (
+              <select 
+                value={currentDevice || ''} 
+                onChange={(e) => setCurrentDevice(e.target.value)}
+                className="device-select"
+              >
+                <option value="">{t.selectDevice}</option>
+                {devicesList.map(device => (
+                  <option key={device} value={device}>
+                    {device}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <div className="no-data-message">
+                <i className="fas fa-info-circle"></i>
+                <span>{t.noDevices}</span>
+                <button 
+                  className="add-btn-small"
+                  onClick={() => {
+                    // فتح نافذة إضافة جهاز
+                    const addFarmBtn = document.querySelector('.add-farm-btn');
+                    if (addFarmBtn) addFarmBtn.click();
+                  }}
+                >
+                  <i className="fas fa-plus"></i>
+                </button>
+              </div>
+            )}
           </div>
 
           {/* إعدادات اللغة */}
@@ -171,14 +330,15 @@ export default function DashboardLayout({ children }) {
                 <i className="fas fa-user"></i>
               </div>
               <div className="user-details">
-                <span className="user-name">{user?.email}</span>
+                <span className="user-name">{userData?.name || user?.email?.split('@')[0]}</span>
+                <span className="user-email">{user?.email}</span>
                 <span className="user-status">
                   <div className="status-dot connected"></div>
                   {t.connected}
                 </span>
               </div>
             </div>
-            <button onClick={logout} className="btn btn-danger logout-btn">
+            <button onClick={handleLogout} className="btn btn-danger logout-btn">
               <i className="fas fa-sign-out-alt"></i>
               <span>{t.logout}</span>
             </button>
@@ -213,6 +373,10 @@ export default function DashboardLayout({ children }) {
               <i className="fas fa-calendar"></i>
               <span>{formatDate(currentTime)}</span>
             </div>
+            <div className="user-welcome">
+              <i className="fas fa-user-check"></i>
+              <span>{t.userWelcome}, <strong>{userData?.name || user?.email?.split('@')[0]}</strong></span>
+            </div>
             <div className="live-indicator">
               <div className="live-dot"></div>
               <span>{t.live}</span>
@@ -230,6 +394,30 @@ export default function DashboardLayout({ children }) {
           min-height: 100vh;
           background: var(--soft-bg);
           position: relative;
+        }
+
+        .loading-container {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          min-height: 100vh;
+          background: var(--soft-bg);
+          gap: 20px;
+        }
+
+        .loading-spinner {
+          width: 50px;
+          height: 50px;
+          border: 4px solid #f3f3f3;
+          border-top: 4px solid var(--primary);
+          border-radius: 50%;
+          animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+          0% { transform: rotate(0deg); }
+          100% { transform: rotate(360deg); }
         }
 
         .sidebar {
@@ -353,6 +541,7 @@ export default function DashboardLayout({ children }) {
           margin-bottom: 2px;
           transition: all 0.3s ease;
           border-right: 4px solid transparent;
+          position: relative;
         }
 
         [dir="ltr"] .nav-item {
@@ -377,6 +566,36 @@ export default function DashboardLayout({ children }) {
           font-size: 1.1rem;
           width: 20px;
           text-align: center;
+        }
+
+        /* تصميم البادج للأجهزة المعلقة */
+        .nav-badge {
+          background: var(--danger);
+          color: white;
+          border-radius: 10px;
+          padding: 2px 6px;
+          font-size: 0.7rem;
+          font-weight: 600;
+          min-width: 18px;
+          height: 18px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          position: absolute;
+          top: 10px;
+          right: 15px;
+          animation: pulse-badge 2s infinite;
+        }
+
+        [dir="ltr"] .nav-badge {
+          right: auto;
+          left: 15px;
+        }
+
+        @keyframes pulse-badge {
+          0% { transform: scale(1); }
+          50% { transform: scale(1.1); }
+          100% { transform: scale(1); }
         }
 
         .farm-selector-section,
@@ -409,7 +628,7 @@ export default function DashboardLayout({ children }) {
           transition: all 0.3s ease;
         }
 
-        .no-farms-message {
+        .no-data-message {
           display: flex;
           align-items: center;
           gap: 8px;
@@ -418,6 +637,27 @@ export default function DashboardLayout({ children }) {
           border-radius: 6px;
           color: #A0AEC0;
           font-size: 0.8rem;
+          justify-content: space-between;
+        }
+
+        .add-btn-small {
+          background: var(--primary);
+          color: white;
+          border: none;
+          border-radius: 4px;
+          width: 24px;
+          height: 24px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          cursor: pointer;
+          font-size: 0.7rem;
+          transition: all 0.3s ease;
+        }
+
+        .add-btn-small:hover {
+          background: var(--primary-dark);
+          transform: scale(1.1);
         }
 
         .user-section {
@@ -458,6 +698,13 @@ export default function DashboardLayout({ children }) {
           font-weight: 500;
           font-size: 0.8rem;
           margin-bottom: 2px;
+        }
+
+        .user-email {
+          display: block;
+          color: #A0AEC0;
+          font-size: 0.7rem;
+          margin-bottom: 4px;
         }
 
         .user-status {
@@ -567,7 +814,8 @@ export default function DashboardLayout({ children }) {
         }
 
         .current-time,
-        .current-date {
+        .current-date,
+        .user-welcome {
           display: flex;
           align-items: center;
           gap: 10px;
@@ -576,7 +824,8 @@ export default function DashboardLayout({ children }) {
         }
 
         .current-time i,
-        .current-date i {
+        .current-date i,
+        .user-welcome i {
           color: var(--primary);
           font-size: 1.2rem;
         }
@@ -589,6 +838,14 @@ export default function DashboardLayout({ children }) {
 
         .current-date span {
           font-size: 1rem;
+        }
+
+        .user-welcome span {
+          font-size: 1rem;
+        }
+
+        .user-welcome strong {
+          color: var(--primary);
         }
 
         .live-indicator {

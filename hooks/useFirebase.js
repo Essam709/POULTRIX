@@ -42,69 +42,257 @@ const app = initializeApp(firebaseConfig);
 const database = getDatabase(app);
 const auth = getAuth(app);
 
+// ✅ الإصلاح: إنشاء GoogleAuthProvider
+const googleProvider = new GoogleAuthProvider();
+
+// === دوال مساعدة للمسارات ===
+const getUserPath = (uid, subPath = '') => `clients/${uid}${subPath ? `/${subPath}` : ''}`;
+const getDevicePath = (uid, deviceId, subPath = '') => getUserPath(uid, `devices/${deviceId}${subPath ? `/${subPath}` : ''}`);
+const getPendingDevicePath = (deviceId) => `pendingDevices/${deviceId}`;
+const getAuthorizedDevicePath = (deviceId) => `authorizedDevices/${deviceId}`;
+
 // خدمة Firebase الأساسية
 const firebaseService = {
-  // === البيانات في الوقت الحقيقي ===
-  listenToData: (path, callback) => {
-    const dataRef = ref(database, path);
-    onValue(dataRef, (snapshot) => {
-      callback(snapshot);
+  // === نظام المصادقة والمستخدمين ===
+  
+  // إنشاء حساب جديد
+  createUserAccount: async (email, password, userData) => {
+    try {
+      const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+      const user = userCredential.user;
+      
+      // إنشاء بيانات المستخدم في قاعدة البيانات
+      await set(ref(database, getUserPath(user.uid, 'info')), {
+        name: userData.name,
+        email: user.email,
+        createdAt: new Date().toISOString(),
+        ...userData
+      });
+      
+      return user;
+    } catch (error) {
+      console.error('Error creating user account:', error);
+      throw error;
+    }
+  },
+
+  // تحديث بيانات المستخدم
+  updateUserProfile: async (uid, updates) => {
+    try {
+      const userRef = ref(database, getUserPath(uid, 'info'));
+      await update(userRef, {
+        ...updates,
+        updatedAt: new Date().toISOString()
+      });
+    } catch (error) {
+      console.error('Error updating user profile:', error);
+      throw error;
+    }
+  },
+
+  // ✅ الإصلاح: إضافة دوال المصادقة
+  signInWithGoogle: async () => {
+    try {
+      const result = await signInWithPopup(auth, googleProvider);
+      return result.user;
+    } catch (error) {
+      console.error('Error signing in with Google:', error);
+      throw error;
+    }
+  },
+
+  // === نظام الأجهزة المعلقة ===
+
+  // إضافة جهاز جديد قيد الانتظار
+  addPendingDevice: async (deviceId, deviceData) => {
+    try {
+      const pendingRef = ref(database, getPendingDevicePath(deviceId));
+      await set(pendingRef, {
+        ...deviceData,
+        status: 'waiting_approval',
+        createdAt: new Date().toISOString()
+      });
+      return deviceId;
+    } catch (error) {
+      console.error('Error adding pending device:', error);
+      throw error;
+    }
+  },
+
+  // الموافقة على جهاز معلق
+  approveDevice: async (uid, deviceId, customName = null) => {
+    try {
+      const pendingRef = ref(database, getPendingDevicePath(deviceId));
+      const pendingSnapshot = await get(pendingRef);
+      
+      if (!pendingSnapshot.exists()) {
+        throw new Error('Device not found in pending list');
+      }
+
+      const deviceData = pendingSnapshot.val();
+      
+      // نقل الجهاز إلى أجهزة المستخدم
+      const userDeviceRef = ref(database, getDevicePath(uid, deviceId, 'info'));
+      await set(userDeviceRef, {
+        ...deviceData,
+        customName: customName || deviceData.name,
+        approvedAt: new Date().toISOString(),
+        approvedBy: uid,
+        status: 'active'
+      });
+
+      // تسجيل الجهاز في القائمة المصرح بها
+      const authorizedRef = ref(database, getAuthorizedDevicePath(deviceId));
+      await set(authorizedRef, {
+        clientId: uid,
+        approved: true,
+        approvedAt: new Date().toISOString()
+      });
+
+      // حذف الجهاز من القائمة المعلقة
+      await remove(pendingRef);
+
+      return deviceId;
+    } catch (error) {
+      console.error('Error approving device:', error);
+      throw error;
+    }
+  },
+
+  // رفض جهاز معلق
+  rejectDevice: async (deviceId) => {
+    try {
+      const pendingRef = ref(database, getPendingDevicePath(deviceId));
+      await remove(pendingRef);
+    } catch (error) {
+      console.error('Error rejecting device:', error);
+      throw error;
+    }
+  },
+
+  // الحصول على الأجهزة المعلقة
+  getPendingDevices: (callback, errorCallback = null) => {
+    const pendingRef = ref(database, 'pendingDevices');
+    const unsubscribe = onValue(pendingRef, 
+      (snapshot) => {
+        callback(snapshot);
+      },
+      (error) => {
+        console.error('Error in pending devices subscription:', error);
+        if (errorCallback) errorCallback(error);
+      }
+    );
+    return () => off(pendingRef);
+  },
+
+  // الحصول على عدد الأجهزة المعلقة
+  getPendingDevicesCount: (callback) => {
+    const pendingRef = ref(database, 'pendingDevices');
+    onValue(pendingRef, (snapshot) => {
+      const data = snapshot.val();
+      const count = data ? Object.keys(data).length : 0;
+      callback(count);
     });
+    return () => off(pendingRef);
+  },
+
+  // الحصول على أجهزة المستخدم
+  getUserDevices: (uid, callback, errorCallback = null) => {
+    const devicesRef = ref(database, getUserPath(uid, 'devices'));
+    const unsubscribe = onValue(devicesRef, 
+      (snapshot) => {
+        console.log('📱 getUserDevices snapshot:', snapshot.val());
+        callback(snapshot);
+      },
+      (error) => {
+        console.error('Error in user devices subscription:', error);
+        if (errorCallback) errorCallback(error);
+      }
+    );
+    return () => off(devicesRef);
+  },
+
+  // === البيانات في الوقت الحقيقي ===
+  listenToData: (uid, path, callback, errorCallback = null) => {
+    const dataRef = ref(database, getUserPath(uid, path));
+    const unsubscribe = onValue(dataRef, 
+      (snapshot) => {
+        console.log('📊 listenToData snapshot:', { path, data: snapshot.val() });
+        callback(snapshot);
+      },
+      (error) => {
+        console.error('Error in data subscription:', error);
+        if (errorCallback) errorCallback(error);
+      }
+    );
     return () => off(dataRef);
   },
 
-  // === البيانات التاريخية ===
-  listenToHistoricalData: (deviceId, sensorType, callback) => {
-    const historyRef = ref(database, `devices/${deviceId}/history/${sensorType}`);
-    onValue(historyRef, (snapshot) => {
-      callback(snapshot);
-    });
-    return () => off(historyRef);
-  },
-
   // === بيانات المستشعرات في الوقت الحقيقي ===
-  listenToSensorData: (deviceId, sensorType, callback) => {
-    const sensorRef = ref(database, `devices/${deviceId}/sensors/${sensorType}`);
-    onValue(sensorRef, (snapshot) => {
-      callback(snapshot);
-    });
+  listenToSensorData: (uid, deviceId, sensorType, callback, errorCallback = null) => {
+    const sensorRef = ref(database, getDevicePath(uid, deviceId, `sensors/${sensorType}`));
+    const unsubscribe = onValue(sensorRef, 
+      (snapshot) => {
+        console.log('🎯 Sensor data received:', { sensorType, data: snapshot.val() });
+        callback(snapshot);
+      },
+      (error) => {
+        console.error('Error in sensor data subscription:', error);
+        if (errorCallback) errorCallback(error);
+      }
+    );
     return () => off(sensorRef);
   },
 
+  // === البيانات التاريخية ===
+  listenToHistoricalData: (uid, deviceId, sensorType, callback, errorCallback = null) => {
+    const historyRef = ref(database, getDevicePath(uid, deviceId, `history/${sensorType}`));
+    const unsubscribe = onValue(historyRef, 
+      (snapshot) => {
+        callback(snapshot);
+      },
+      (error) => {
+        console.error('Error in historical data subscription:', error);
+        if (errorCallback) errorCallback(error);
+      }
+    );
+    return () => off(historyRef);
+  },
+
   // === الحصول على بيانات مرة واحدة ===
-  getData: async (path) => {
-    const dataRef = ref(database, path);
+  getData: async (uid, path) => {
+    const dataRef = ref(database, getUserPath(uid, path));
     const snapshot = await get(dataRef);
     return snapshot.val();
   },
 
   // === تعيين بيانات ===
-  setData: async (path, data) => {
-    const dataRef = ref(database, path);
+  setData: async (uid, path, data) => {
+    const dataRef = ref(database, getUserPath(uid, path));
     await set(dataRef, data);
   },
 
   // === تحديث بيانات ===
-  updateData: async (path, updates) => {
-    const dataRef = ref(database, path);
+  updateData: async (uid, path, updates) => {
+    const dataRef = ref(database, getUserPath(uid, path));
     await update(dataRef, updates);
   },
 
   // === إضافة بيانات جديدة ===
-  pushData: async (path, data) => {
-    const dataRef = ref(database, path);
+  pushData: async (uid, path, data) => {
+    const dataRef = ref(database, getUserPath(uid, path));
     const result = await push(dataRef, data);
     return result.key;
   },
 
   // === حذف بيانات ===
-  removeData: async (path) => {
-    const dataRef = ref(database, path);
+  removeData: async (uid, path) => {
+    const dataRef = ref(database, getUserPath(uid, path));
     await remove(dataRef);
   },
 
   // === التحقق من اتصال Firebase ===
-  checkConnection: (callback) => {
+  isConnected: (callback) => {
     const connectedRef = ref(database, '.info/connected');
     onValue(connectedRef, (snapshot) => {
       callback(snapshot.val() === true);
@@ -117,86 +305,142 @@ const firebaseService = {
   // التحقق من ترخيص الجهاز
   checkDeviceAuthorization: async (deviceId) => {
     try {
-      const authDeviceRef = ref(database, `authorizedDevices/${deviceId}`);
+      const authDeviceRef = ref(database, getAuthorizedDevicePath(deviceId));
       const snapshot = await get(authDeviceRef);
-      return snapshot.exists();
+      return snapshot.exists() ? snapshot.val() : null;
     } catch (error) {
       console.error('Error checking device authorization:', error);
-      return false;
+      return null;
     }
   },
 
-  // التحقق من وجود بيانات الجهاز
-  checkDeviceData: async (deviceId) => {
+  // التحقق من وجود بيانات الجهاز للمستخدم الحالي
+  checkUserDevice: async (uid, deviceId) => {
     try {
-      const deviceRef = ref(database, `devices/${deviceId}`);
+      const deviceRef = ref(database, getDevicePath(uid, deviceId));
       const snapshot = await get(deviceRef);
       return snapshot.exists();
     } catch (error) {
-      console.error('Error checking device data:', error);
+      console.error('Error checking user device:', error);
       return false;
     }
   },
 
   // الحصول على معلومات المزرعة
-  getFarmInfo: async (deviceId) => {
+  getFarmInfo: async (uid, deviceId) => {
     try {
-      const [authSnapshot, dataSnapshot] = await Promise.all([
-        get(ref(database, `authorizedDevices/${deviceId}`)),
-        get(ref(database, `devices/${deviceId}`))
+      const [deviceSnapshot, authSnapshot] = await Promise.all([
+        get(ref(database, getDevicePath(uid, deviceId))),
+        get(ref(database, getAuthorizedDevicePath(deviceId)))
       ]);
 
       return {
-        isAuthorized: authSnapshot.exists(),
-        hasData: dataSnapshot.exists(),
-        data: dataSnapshot.val()
+        isAuthorized: authSnapshot.exists() && authSnapshot.val().clientId === uid,
+        hasData: deviceSnapshot.exists(),
+        data: deviceSnapshot.val(),
+        authorization: authSnapshot.val()
       };
     } catch (error) {
       console.error('Error getting farm info:', error);
-      return { isAuthorized: false, hasData: false, data: null };
+      return { isAuthorized: false, hasData: false, data: null, authorization: null };
     }
   },
 
   // === نظام الوحدات الذكية ===
 
-  // إضافة وحدة جديدة
-  addUnit: async (deviceId, unitId, unitData) => {
+  // 🔥 الإصلاح الرئيسي: الحصول على وحدات الجهاز
+  getDeviceUnits: (uid, deviceId, callback, errorCallback = null) => {
+    console.log('🔄 getDeviceUnits called:', { uid, deviceId });
+    
+    const unitsRef = ref(database, getDevicePath(uid, deviceId, 'units'));
+    console.log('📡 Units path:', getDevicePath(uid, deviceId, 'units'));
+    
+    const unsubscribe = onValue(unitsRef, 
+      (snapshot) => {
+        const data = snapshot.val();
+        console.log('📥 Units data received:', data);
+        console.log('🔢 Number of units:', data ? Object.keys(data).length : 0);
+        callback(snapshot);
+      },
+      (error) => {
+        console.error('❌ Error in units subscription:', error);
+        if (errorCallback) errorCallback(error);
+      }
+    );
+    
+    return () => {
+      console.log('🧹 Unsubscribing from units');
+      off(unitsRef);
+    };
+  },
+
+  // 🔥 الإصلاح الرئيسي: إضافة وحدة جديدة
+  addUnit: async (uid, deviceId, unitId, unitData) => {
     try {
-      const unitRef = ref(database, `devices/${deviceId}/units/${unitId}`);
+      console.log('🆕 Adding unit:', { uid, deviceId, unitId, unitData });
+      
+      const unitPath = getDevicePath(uid, deviceId, `units/${unitId}`);
+      console.log('📁 Unit path:', unitPath);
+      
+      const unitRef = ref(database, unitPath);
       await set(unitRef, unitData);
+      
+      console.log('✅ Unit added successfully to Firebase');
+      
+      // ✅ الإضافة: التحقق من أن البيانات مخزنة بالاستعلام مرة أخرى
+      const verifyRef = ref(database, unitPath);
+      const snapshot = await get(verifyRef);
+      console.log('🔍 Verification - Unit exists:', snapshot.exists());
+      console.log('🔍 Verification - Unit data:', snapshot.val());
+      
+      // ✅ الإضافة: التحقق من أن الوحدة موجودة في قائمة الوحدات
+      const unitsListRef = ref(database, getDevicePath(uid, deviceId, 'units'));
+      const unitsSnapshot = await get(unitsListRef);
+      console.log('📋 All units after addition:', unitsSnapshot.val());
+      
       return unitId;
     } catch (error) {
-      console.error('Error adding unit:', error);
+      console.error('❌ Error adding unit:', error);
+      console.error('🔧 Error details:', error.message);
+      console.error('🔧 Error stack:', error.stack);
       throw error;
     }
   },
 
   // تحديث وحدة
-  updateUnit: async (deviceId, unitId, updates) => {
+  updateUnit: async (uid, deviceId, unitId, updates) => {
     try {
-      const unitRef = ref(database, `devices/${deviceId}/units/${unitId}`);
+      console.log('✏️ Updating unit:', { uid, deviceId, unitId, updates });
+      
+      const unitRef = ref(database, getDevicePath(uid, deviceId, `units/${unitId}`));
       await update(unitRef, updates);
+      
+      console.log('✅ Unit updated successfully');
     } catch (error) {
-      console.error('Error updating unit:', error);
+      console.error('❌ Error updating unit:', error);
       throw error;
     }
   },
 
   // حذف وحدة
-  deleteUnit: async (deviceId, unitId) => {
+  deleteUnit: async (uid, deviceId, unitId) => {
     try {
-      const unitRef = ref(database, `devices/${deviceId}/units/${unitId}`);
+      console.log('🗑️ Deleting unit:', { uid, deviceId, unitId });
+      
+      const unitRef = ref(database, getDevicePath(uid, deviceId, `units/${unitId}`));
       await remove(unitRef);
+      
+      console.log('✅ Unit deleted successfully');
     } catch (error) {
-      console.error('Error deleting unit:', error);
+      console.error('❌ Error deleting unit:', error);
       throw error;
     }
   },
 
   // الحصول على إعدادات الوحدة
-  getUnitSettings: async (deviceId, unitId) => {
+  getUnitSettings: async (uid, deviceId, unitId) => {
     try {
-      const unitRef = ref(database, `devices/${deviceId}/units/${unitId}`);
+      const unitRef = ref(database, getDevicePath(uid, deviceId, `units/${unitId}`));
       const snapshot = await get(unitRef);
       return snapshot.val();
     } catch (error) {
@@ -205,12 +449,20 @@ const firebaseService = {
     }
   },
 
-  // === نظام الأتمتة ===
+  // ✅ الإضافة: دالة الحصول على مرجع مباشر
+  getRef: (path) => {
+    return ref(database, path);
+  },
 
-  // تحديث إعدادات الأتمتة
-  updateAutomation: async (deviceId, automationType, settings) => {
+  // ✅ الإضافة: دالة الحصول على البيانات مرة واحدة
+  get: (ref) => {
+    return get(ref);
+  },
+
+  // === نظام الأتمتة ===
+  updateAutomation: async (uid, deviceId, automationType, settings) => {
     try {
-      const automationRef = ref(database, `devices/${deviceId}/automation/${automationType}`);
+      const automationRef = ref(database, getDevicePath(uid, deviceId, `automation/${automationType}`));
       await update(automationRef, {
         ...settings,
         lastUpdate: new Date().toISOString()
@@ -222,11 +474,9 @@ const firebaseService = {
   },
 
   // === نظام التنبيهات ===
-
-  // إضافة تنبيه جديد
-  addAlert: async (deviceId, alertData) => {
+  addAlert: async (uid, deviceId, alertData) => {
     try {
-      const alertsRef = ref(database, `devices/${deviceId}/alerts`);
+      const alertsRef = ref(database, getDevicePath(uid, deviceId, 'alerts'));
       const newAlertRef = push(alertsRef);
       await set(newAlertRef, {
         ...alertData,
@@ -241,9 +491,9 @@ const firebaseService = {
   },
 
   // تحديث حالة التنبيه
-  updateAlertStatus: async (deviceId, alertId, status) => {
+  updateAlertStatus: async (uid, deviceId, alertId, status) => {
     try {
-      const alertRef = ref(database, `devices/${deviceId}/alerts/${alertId}`);
+      const alertRef = ref(database, getDevicePath(uid, deviceId, `alerts/${alertId}`));
       await update(alertRef, { 
         status,
         resolvedAt: status === 'resolved' ? new Date().toISOString() : null
@@ -255,15 +505,11 @@ const firebaseService = {
   },
 
   // === نظام التقارير والإحصائيات ===
-
-  // الحصول على إحصائيات الجهاز
-  getDeviceStats: async (deviceId, timeRange = '24h') => {
+  getDeviceStats: async (uid, deviceId, timeRange = '24h') => {
     try {
-      const statsRef = ref(database, `devices/${deviceId}/stats`);
+      const statsRef = ref(database, getDevicePath(uid, deviceId, 'stats'));
       const snapshot = await get(statsRef);
       const stats = snapshot.val() || {};
-
-      // تصفية حسب النطاق الزمني إذا لزم الأمر
       return this.filterStatsByTimeRange(stats, timeRange);
     } catch (error) {
       console.error('Error getting device stats:', error);
@@ -293,7 +539,6 @@ const firebaseService = {
         timeLimit = now - (24 * 60 * 60 * 1000);
     }
 
-    // تطبيق التصفية على البيانات
     const filteredStats = {};
     Object.keys(stats).forEach(key => {
       if (stats[key].timestamp >= timeLimit) {
@@ -305,14 +550,11 @@ const firebaseService = {
   },
 
   // === دوال مساعدة ===
-
-  // تنظيف البيانات القديمة
-  cleanupOldData: async (deviceId, olderThanDays = 30) => {
+  cleanupOldData: async (uid, deviceId, olderThanDays = 30) => {
     try {
       const cutoffTime = Date.now() - (olderThanDays * 24 * 60 * 60 * 1000);
       
-      // تنظيف البيانات التاريخية القديمة
-      const historyRef = ref(database, `devices/${deviceId}/history`);
+      const historyRef = ref(database, getDevicePath(uid, deviceId, 'history'));
       const historySnapshot = await get(historyRef);
       const historyData = historySnapshot.val() || {};
 
@@ -321,7 +563,7 @@ const firebaseService = {
       Object.keys(historyData).forEach(sensorType => {
         Object.keys(historyData[sensorType]).forEach(timestamp => {
           if (parseInt(timestamp) < cutoffTime) {
-            const dataRef = ref(database, `devices/${deviceId}/history/${sensorType}/${timestamp}`);
+            const dataRef = ref(database, getDevicePath(uid, deviceId, `history/${sensorType}/${timestamp}`));
             cleanupPromises.push(remove(dataRef));
           }
         });
@@ -336,9 +578,9 @@ const firebaseService = {
   },
 
   // نسخ إحتياطي للبيانات
-  backupData: async (deviceId, backupPath) => {
+  backupData: async (uid, deviceId, backupPath) => {
     try {
-      const deviceRef = ref(database, `devices/${deviceId}`);
+      const deviceRef = ref(database, getDevicePath(uid, deviceId));
       const snapshot = await get(deviceRef);
       const data = snapshot.val();
 
@@ -353,33 +595,25 @@ const firebaseService = {
   }
 };
 
-// تصدير كائنات Firebase للاستخدام في الملفات الأخرى
-export { app, database, auth };
-
-// تصدير دوال Firebase المفردة للتوافق مع الكود الحالي
-export const firebaseDatabase = database;
-export const firebaseRef = ref;
-export const firebaseSet = set;
-export const firebasePush = push;
-export const firebaseRemove = remove;
-export const firebaseUpdate = update;
-export const firebaseOnValue = onValue;
-export const firebaseGet = get;
-export const firebaseOff = off;
-
-// تصدير دوال المصادقة
-export {
+// ✅ الإصلاح: تصدير GoogleAuthProvider المُنشأ
+export { 
+  app, 
+  database, 
+  auth, 
+  googleProvider,
   getAuth,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   signOut,
   onAuthStateChanged,
-  GoogleAuthProvider,
   signInWithPopup,
   sendPasswordResetEmail,
-  updateProfile
+  updateProfile,
+  getUserPath, 
+  getDevicePath, 
+  getPendingDevicePath, 
+  getAuthorizedDevicePath,
+  firebaseService 
 };
 
-// تصدير الخدمة الأساسية
-export { firebaseService };
 export default firebaseService;

@@ -1,7 +1,6 @@
 // components/dashboard/SensorChart.js
 import React, { useEffect, useRef, useContext, useMemo, useCallback, useState } from 'react';
 import { AppContext } from '../../contexts/AppContext';
-import { firebaseService } from '../../hooks/useFirebase';
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -27,19 +26,19 @@ ChartJS.register(
   Filler
 );
 
-const SensorChart = ({ sensorType, deviceId }) => {
-  const { historicalData, setHistoricalData, language, SENSOR_INFO } = useContext(AppContext);
+const SensorChart = ({ sensorType, deviceId, userId }) => {
+  const { historicalData, language, SENSOR_INFO, currentSensor } = useContext(AppContext);
   const chartRef = useRef();
-  const unsubscribeRef = useRef(null);
   const [timeRange, setTimeRange] = useState('24h');
   const [chartData, setChartData] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
 
-  // الترجمات باستخدام useMemo
+  // الترجمات
   const translations = useMemo(() => ({
     ar: {
       temperatureChart: "مخطط درجة الحرارة",
-      humidityChart: "مخطط الرطوبة",
+      humidityChart: "مخطط الرطوبة", 
       ammoniaChart: "مخطط الأمونيا",
       airQualityChart: "مخطط جودة الهواء",
       live: "مباشر",
@@ -49,12 +48,15 @@ const SensorChart = ({ sensorType, deviceId }) => {
       last7Days: "آخر 7 أيام",
       noData: "لا توجد بيانات متاحة",
       loading: "جاري تحميل البيانات...",
-      selectTimeRange: "اختر النطاق الزمني"
+      selectTimeRange: "اختر النطاق الزمني",
+      noDeviceSelected: "لم يتم اختيار جهاز",
+      noUser: "يجب تسجيل الدخول أولاً",
+      dataError: "خطأ في تحميل البيانات"
     },
     en: {
       temperatureChart: "Temperature Chart",
       humidityChart: "Humidity Chart",
-      airQualityChart: "Air Quality Chart",
+      airQualityChart: "Air Quality Chart", 
       ammoniaChart: "Ammonia Chart",
       live: "Live",
       lastHour: "Last Hour",
@@ -63,190 +65,180 @@ const SensorChart = ({ sensorType, deviceId }) => {
       last7Days: "Last 7 Days",
       noData: "No data available",
       loading: "Loading data...",
-      selectTimeRange: "Select Time Range"
+      selectTimeRange: "Select Time Range",
+      noDeviceSelected: "No device selected",
+      noUser: "Please login first",
+      dataError: "Error loading data"
     }
   }), []);
 
   const t = translations[language];
   const sensorInfo = SENSOR_INFO[sensorType];
 
-  // معالجة البيانات التاريخية
-  const processHistoricalData = useCallback((data) => {
-    if (!data || typeof data !== 'object') {
+  // 🔥 الإصلاح: تحويل البيانات من Firebase إلى تنسيق الرسم البياني
+  const processChartData = useCallback(() => {
+    console.log('📊 [CHART] Processing data for sensor:', sensorType, {
+      hasHistoricalData: !!historicalData[sensorType],
+      dataStructure: historicalData[sensorType] ? typeof historicalData[sensorType] : 'no data'
+    });
+
+    if (!historicalData[sensorType] || typeof historicalData[sensorType] !== 'object') {
+      console.log('❌ [CHART] No data available for sensor:', sensorType);
       setChartData(null);
-      setLoading(false);
+      setError(t.noData);
       return;
     }
 
     try {
-      const dataArray = Object.entries(data)
-        .map(([timestamp, value]) => ({
-          timestamp: parseInt(timestamp),
-          value: parseFloat(value) || 0
-        }))
-        .sort((a, b) => a.timestamp - b.timestamp);
+      // 🔥 الإصلاح: تحويل البيانات من {timestamp: value} إلى [{timestamp, value}]
+      const rawData = historicalData[sensorType];
+      let dataArray = [];
 
-      setHistoricalData(prev => ({
-        ...prev,
-        [sensorType]: dataArray
-      }));
-
-      setLoading(false);
-    } catch (error) {
-      console.error('Error processing historical data:', error);
-      setLoading(false);
-    }
-  }, [sensorType, setHistoricalData]);
-
-  // الاشتراك في بيانات Firebase
-  useEffect(() => {
-    if (!deviceId || !sensorType || !firebaseService) {
-      console.warn('Firebase service not available or missing parameters');
-      setLoading(false);
-      return;
-    }
-
-    setLoading(true);
-
-    // إلغاء الاشتراك السابق إذا كان موجوداً
-    if (unsubscribeRef.current) {
-      unsubscribeRef.current();
-    }
-
-    try {
-      unsubscribeRef.current = firebaseService.listenToHistoricalData(
-        deviceId,
-        sensorType,
-        (snapshot) => {
-          const data = snapshot?.val();
-          processHistoricalData(data);
-        },
-        (error) => {
-          console.error(`Error listening to ${sensorType} data:`, error);
-          setLoading(false);
-        }
-      );
-    } catch (error) {
-      console.error('Failed to subscribe to sensor data:', error);
-      setLoading(false);
-    }
-
-    // تنظيف الاشتراك عند إلغاء التثبيت
-    return () => {
-      if (unsubscribeRef.current) {
-        unsubscribeRef.current();
-        unsubscribeRef.current = null;
+      if (Array.isArray(rawData)) {
+        // إذا كانت البيانات بالفعل مصفوفة (الشكل القديم)
+        dataArray = rawData;
+      } else {
+        // تحويل من object إلى array
+        dataArray = Object.entries(rawData)
+          .map(([timestamp, value]) => ({
+            timestamp: parseInt(timestamp),
+            value: parseFloat(value) || 0
+          }))
+          .sort((a, b) => a.timestamp - b.timestamp);
       }
-    };
-  }, [deviceId, sensorType, processHistoricalData]);
 
-  // تصفية البيانات حسب النطاق الزمني
-  const filterDataByTimeRange = useCallback((data, range) => {
-    if (!data || !data.length) return [];
+      console.log('✅ [CHART] Data processed:', {
+        sensor: sensorType,
+        dataPoints: dataArray.length,
+        sample: dataArray.slice(0, 3)
+      });
 
-    const now = Date.now();
-    let timeLimit;
+      if (dataArray.length === 0) {
+        setChartData(null);
+        setError(t.noData);
+        return;
+      }
 
-    switch (range) {
-      case '1h':
-        timeLimit = now - (60 * 60 * 1000);
-        break;
-      case '6h':
-        timeLimit = now - (6 * 60 * 60 * 1000);
-        break;
-      case '24h':
-        timeLimit = now - (24 * 60 * 60 * 1000);
-        break;
-      case '7d':
-        timeLimit = now - (7 * 24 * 60 * 60 * 1000);
-        break;
-      default:
-        timeLimit = now - (24 * 60 * 60 * 1000);
-    }
+      // تصفية البيانات حسب النطاق الزمني
+      const now = Date.now();
+      let timeLimit;
 
-    return data.filter(item => item.timestamp >= timeLimit);
-  }, []);
+      switch (timeRange) {
+        case '1h':
+          timeLimit = now - (60 * 60 * 1000);
+          break;
+        case '6h':
+          timeLimit = now - (6 * 60 * 60 * 1000);
+          break;
+        case '24h':
+          timeLimit = now - (24 * 60 * 60 * 1000);
+          break;
+        case '7d':
+          timeLimit = now - (7 * 24 * 60 * 60 * 1000);
+          break;
+        default:
+          timeLimit = now - (24 * 60 * 60 * 1000);
+      }
 
-  // إعداد بيانات الرسم البياني
-  useEffect(() => {
-    const sensorData = historicalData[sensorType] || [];
-    const filteredData = filterDataByTimeRange(sensorData, timeRange);
+      const filteredData = dataArray.filter(item => item.timestamp >= timeLimit);
 
-    if (!filteredData.length) {
+      if (filteredData.length === 0) {
+        setChartData({
+          labels: [t.noData],
+          datasets: [
+            {
+              label: `${sensorInfo?.name || sensorType} (${sensorInfo?.unit || ''})`,
+              data: [0],
+              borderColor: sensorInfo?.color || '#666666',
+              backgroundColor: sensorInfo?.backgroundColor || 'rgba(102, 102, 102, 0.1)',
+              borderWidth: 2,
+              fill: true,
+              tension: 0.4,
+              pointRadius: 0
+            }
+          ]
+        });
+        return;
+      }
+
+      // إنشاء التسميات والقيم
+      const labels = filteredData.map(item => {
+        const date = new Date(item.timestamp);
+        
+        switch (timeRange) {
+          case '1h':
+          case '6h':
+            return date.toLocaleTimeString(language === 'ar' ? 'ar-EG' : 'en-US', {
+              hour: '2-digit',
+              minute: '2-digit'
+            });
+          case '24h':
+            return date.toLocaleTimeString(language === 'ar' ? 'ar-EG' : 'en-US', {
+              hour: '2-digit'
+            });
+          case '7d':
+            return date.toLocaleDateString(language === 'ar' ? 'ar-EG' : 'en-US', {
+              month: 'short',
+              day: 'numeric'
+            });
+          default:
+            return date.toLocaleTimeString(language === 'ar' ? 'ar-EG' : 'en-US');
+        }
+      });
+
+      const values = filteredData.map(item => item.value);
+
       setChartData({
-        labels: [t.loading],
+        labels,
         datasets: [
           {
             label: `${sensorInfo?.name || sensorType} (${sensorInfo?.unit || ''})`,
-            data: [0],
+            data: values,
             borderColor: sensorInfo?.color || '#666666',
-            backgroundColor: sensorInfo?.backgroundColor || 'rgba(102, 102, 102, 0.2)',
+            backgroundColor: sensorInfo?.backgroundColor || 'rgba(102, 102, 102, 0.1)',
             borderWidth: 2,
             fill: true,
             tension: 0.4,
-            pointRadius: 0
+            pointBackgroundColor: sensorInfo?.color || '#666666',
+            pointBorderColor: '#ffffff',
+            pointBorderWidth: 2,
+            pointRadius: values.length > 50 ? 1 : 3,
+            pointHoverRadius: 5
           }
         ]
       });
-      return;
-    }
 
-    const labels = filteredData.map(item => {
-      const date = new Date(item.timestamp);
+      setError(null);
       
-      switch (timeRange) {
-        case '1h':
-        case '6h':
-          return date.toLocaleTimeString(language === 'ar' ? 'ar-EG' : 'en-US', {
-            hour: '2-digit',
-            minute: '2-digit'
-          });
-        case '24h':
-          return date.toLocaleTimeString(language === 'ar' ? 'ar-EG' : 'en-US', {
-            hour: '2-digit'
-          });
-        case '7d':
-          return date.toLocaleDateString(language === 'ar' ? 'ar-EG' : 'en-US', {
-            month: 'short',
-            day: 'numeric'
-          });
-        default:
-          return date.toLocaleTimeString(language === 'ar' ? 'ar-EG' : 'en-US');
-      }
-    });
+    } catch (error) {
+      console.error('❌ [CHART] Error processing chart data:', error);
+      setError(t.dataError);
+      setChartData(null);
+    }
+  }, [historicalData, sensorType, timeRange, language, sensorInfo, t]);
 
-    const values = filteredData.map(item => item.value);
+  // 🔥 الإصلاح: معالجة البيانات عند تغيير المستشعر أو البيانات
+  useEffect(() => {
+    console.log('🎯 [CHART] useEffect triggered - Sensor:', sensorType, 'Current Sensor:', currentSensor);
+    
+    setLoading(true);
+    
+    // تأخير بسيط لضمان استقرار البيانات
+    const timer = setTimeout(() => {
+      processChartData();
+      setLoading(false);
+    }, 100);
 
-    setChartData({
-      labels,
-      datasets: [
-        {
-          label: `${sensorInfo?.name || sensorType} (${sensorInfo?.unit || ''})`,
-          data: values,
-          borderColor: sensorInfo?.color || '#666666',
-          backgroundColor: sensorInfo?.backgroundColor || 'rgba(102, 102, 102, 0.2)',
-          borderWidth: 2,
-          fill: true,
-          tension: 0.4,
-          pointBackgroundColor: sensorInfo?.color || '#666666',
-          pointBorderColor: '#ffffff',
-          pointBorderWidth: 2,
-          pointRadius: values.length > 50 ? 2 : 4,
-          pointHoverRadius: 6
-        }
-      ]
-    });
-  }, [historicalData, sensorType, timeRange, language, sensorInfo, t.loading, filterDataByTimeRange]);
+    return () => clearTimeout(timer);
+  }, [historicalData, sensorType, timeRange, processChartData, currentSensor]);
 
-  // إعدادات الرسم البياني باستخدام useMemo
+  // إعدادات الرسم البياني
   const chartOptions = useMemo(() => ({
     responsive: true,
     maintainAspectRatio: false,
     scales: {
       y: {
-        beginAtZero: sensorInfo?.min === 0,
-        suggestedMin: sensorInfo?.min,
-        suggestedMax: sensorInfo?.max,
+        beginAtZero: false,
         grid: {
           color: 'rgba(0, 0, 0, 0.1)',
           drawBorder: false
@@ -291,10 +283,6 @@ const SensorChart = ({ sensorType, deviceId }) => {
         callbacks: {
           label: function(context) {
             return `${context.parsed.y} ${sensorInfo?.unit || ''}`;
-          },
-          title: function(context) {
-            const date = new Date(historicalData[sensorType]?.[context[0].dataIndex]?.timestamp);
-            return date.toLocaleString(language === 'ar' ? 'ar-EG' : 'en-US');
           }
         }
       }
@@ -304,29 +292,37 @@ const SensorChart = ({ sensorType, deviceId }) => {
       mode: 'index'
     },
     animation: {
-      duration: 750,
-      easing: 'easeOutQuart'
-    },
-    elements: {
-      line: {
-        cubicInterpolationMode: 'monotone'
-      }
+      duration: 500
     }
-  }), [sensorInfo, historicalData, sensorType, language]);
+  }), [sensorInfo]);
 
   const handleTimeRangeChange = (event) => {
     setTimeRange(event.target.value);
   };
 
   // التحقق من وجود البيانات
-  const hasData = historicalData[sensorType]?.length > 0;
+  const hasData = historicalData[sensorType] && Object.keys(historicalData[sensorType]).length > 0;
 
-  if (!sensorType || !deviceId) {
+  // عرض حالات الخطأ
+  if (error) {
     return (
       <div className="card">
         <div className="chart-error">
           <i className="fas fa-exclamation-triangle"></i>
-          <span>{t.noData}</span>
+          <span>{error}</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (!userId || !deviceId) {
+    return (
+      <div className="card">
+        <div className="chart-error">
+          <i className="fas fa-info-circle"></i>
+          <span>
+            {!userId ? t.noUser : t.noDeviceSelected}
+          </span>
         </div>
       </div>
     );
@@ -352,7 +348,7 @@ const SensorChart = ({ sensorType, deviceId }) => {
             className="time-range-selector" 
             onChange={handleTimeRangeChange}
             value={timeRange}
-            disabled={loading}
+            disabled={loading || !hasData}
           >
             <option value="1h">{t.lastHour}</option>
             <option value="6h">{t.last6Hours}</option>
@@ -373,7 +369,7 @@ const SensorChart = ({ sensorType, deviceId }) => {
             ref={chartRef}
             data={chartData} 
             options={chartOptions}
-            key={`${sensorType}-${deviceId}-${language}-${timeRange}`}
+            key={`${sensorType}-${timeRange}-${language}`}
           />
         ) : (
           <div className="chart-no-data">
@@ -388,6 +384,10 @@ const SensorChart = ({ sensorType, deviceId }) => {
           height: 100%;
           display: flex;
           flex-direction: column;
+          background: var(--white-card);
+          border-radius: 12px;
+          box-shadow: var(--shadow-soft);
+          padding: 20px;
         }
 
         .chart-header {
@@ -426,6 +426,20 @@ const SensorChart = ({ sensorType, deviceId }) => {
           border: 1px solid #bbf7d0;
         }
 
+        .live-dot {
+          width: 6px;
+          height: 6px;
+          background: var(--success);
+          border-radius: 50%;
+          animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+          0% { opacity: 1; }
+          50% { opacity: 0.5; }
+          100% { opacity: 1; }
+        }
+
         .chart-actions {
           display: flex;
           gap: 10px;
@@ -439,16 +453,7 @@ const SensorChart = ({ sensorType, deviceId }) => {
           background: white;
           font-size: 0.8rem;
           color: var(--text-dark);
-        }
-
-        .time-range-selector:focus {
-          outline: none;
-          border-color: var(--primary);
-        }
-
-        .time-range-selector:disabled {
-          background: #f8f9fa;
-          cursor: not-allowed;
+          cursor: pointer;
         }
 
         .chart-container {
@@ -495,31 +500,24 @@ const SensorChart = ({ sensorType, deviceId }) => {
           gap: 10px;
           padding: 40px;
           color: var(--danger);
+          text-align: center;
         }
 
         @media (max-width: 768px) {
+          .card {
+            padding: 15px;
+          }
           .chart-header {
             flex-direction: column;
             align-items: flex-start;
           }
-
-          .chart-actions {
-            width: 100%;
-          }
-
-          .time-range-selector {
-            width: 100%;
+          .chart-container {
+            min-height: 250px;
           }
         }
       `}</style>
     </div>
   );
-};
-
-// القيم الافتراضية للخصائص
-SensorChart.defaultProps = {
-  sensorType: 'temperature',
-  deviceId: ''
 };
 
 export default React.memo(SensorChart);

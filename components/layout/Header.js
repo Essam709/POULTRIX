@@ -1,5 +1,5 @@
-// components/layout/Header.js
 import React, { useContext, useState, useEffect } from 'react';
+import { useRouter } from 'next/router';
 import { AppContext } from '../../contexts/AppContext';
 import { useAuth } from '../../contexts/AuthContext';
 import { firebaseService } from '../../hooks/useFirebase';
@@ -21,44 +21,180 @@ const Header = () => {
     selectFarm
   } = useContext(AppContext);
 
-  const { user, logout } = useAuth();
+  const { user, logout, userData } = useAuth();
   const [isUnitsPage, setIsUnitsPage] = useState(false);
+  const [isPendingPage, setIsPendingPage] = useState(false);
+  const [pendingDevices, setPendingDevices] = useState([]);
+  const [pendingDevicesCount, setPendingDevicesCount] = useState(0);
+  const router = useRouter();
 
   useEffect(() => {
-    setIsUnitsPage(window.location.pathname === '/units');
-  }, []);
+    const path = router.pathname;
+    setIsUnitsPage(path === '/units');
+    setIsPendingPage(path === '/devices/pending');
+    
+    // تحميل الأجهزة المعلقة إذا كان المستخدم مسجل الدخول
+    if (user) {
+      loadPendingDevices();
+      loadPendingDevicesCount();
+    }
+  }, [user, router.pathname]);
+
+  // تحميل الأجهزة المعلقة
+  const loadPendingDevices = () => {
+    return firebaseService.getPendingDevices((snapshot) => {
+      const pendingData = snapshot.val();
+      if (pendingData) {
+        const devices = Object.keys(pendingData).map(deviceId => ({
+          id: deviceId,
+          ...pendingData[deviceId]
+        }));
+        setPendingDevices(devices);
+      } else {
+        setPendingDevices([]);
+      }
+    });
+  };
+
+  // تحميل عدد الأجهزة المعلقة
+  const loadPendingDevicesCount = () => {
+    return firebaseService.getPendingDevicesCount((count) => {
+      setPendingDevicesCount(count);
+    });
+  };
 
   const handleDeviceChange = (deviceId) => {
     setCurrentDevice(deviceId);
   };
 
   const handleAddFarm = async () => {
-    const promptText = language === 'ar' 
-      ? 'أدخل معرف الجهاز / المزرعة (مثال: FAN-CTRL-006):' 
-      : 'Enter Farm Device ID (e.g., FAN-CTRL-006):';
-    
-    const deviceId = prompt(promptText);
-    if (!deviceId) return;
+    if (!user) {
+      const message = language === 'ar' 
+        ? 'يجب تسجيل الدخول أولاً' 
+        : 'Please login first';
+      alert(message);
+      return;
+    }
 
-    const trimmedId = deviceId.trim();
-    if (!trimmedId) return;
+    // عرض خيارات إضافة مزرعة
+    const options = language === 'ar' 
+      ? ['إضافة جهاز جديد', 'الموافقة على جهاز معلق', 'إدخال معرف جهاز يدوياً']
+      : ['Add New Device', 'Approve Pending Device', 'Enter Device ID Manually'];
+    
+    const choice = prompt(
+      language === 'ar' 
+        ? `اختر طريقة الإضافة:\n1. ${options[0]}\n2. ${options[1]}\n3. ${options[2]}\n\nأدخل الرقم (1, 2, 3):`
+        : `Choose addition method:\n1. ${options[0]}\n2. ${options[1]}\n3. ${options[2]}\n\nEnter number (1, 2, 3):`
+    );
+
+    if (!choice) return;
 
     try {
-      const isAuthorized = await firebaseService.checkDeviceAuthorization(trimmedId);
-      if (isAuthorized) {
-        addFarm(trimmedId);
-        const successMessage = language === 'ar' 
-          ? `تم إضافة المزرعة ${trimmedId} بنجاح` 
-          : `Farm ${trimmedId} added successfully`;
-        alert(successMessage);
-      } else {
-        const errorMessage = language === 'ar'
-          ? `المزرعة ${trimmedId} غير متصلة أو غير مصرح بها`
-          : `Farm ${trimmedId} is not connected or not authorized`;
-        alert(errorMessage);
+      let deviceId;
+
+      switch (choice.trim()) {
+        case '1':
+          // إضافة جهاز جديد (سيظهر في الأجهزة المعلقة)
+          deviceId = prompt(
+            language === 'ar' 
+              ? 'أدخل معرف الجهاز الجديد (مثال: ESP32_FARM_001):' 
+              : 'Enter new device ID (e.g., ESP32_FARM_001):'
+          );
+          if (!deviceId) return;
+
+          const deviceData = {
+            name: deviceId,
+            model: 'ESP32-S3',
+            createdBy: user.uid,
+            createdAt: new Date().toISOString()
+          };
+
+          await firebaseService.addPendingDevice(deviceId.trim(), deviceData);
+          
+          const successMessage = language === 'ar'
+            ? `تم إضافة الجهاز ${deviceId} وقيد الانتظار للموافقة`
+            : `Device ${deviceId} added and pending approval`;
+          alert(successMessage);
+          return;
+
+        case '2':
+          // الموافقة على جهاز معلق
+          if (pendingDevices.length === 0) {
+            const noPendingMessage = language === 'ar'
+              ? 'لا توجد أجهزة معلقة'
+              : 'No pending devices';
+            alert(noPendingMessage);
+            return;
+          }
+
+          const deviceList = pendingDevices.map((device, index) => 
+            `${index + 1}. ${device.id} - ${device.name || device.model}`
+          ).join('\n');
+
+          const deviceChoice = prompt(
+            language === 'ar'
+              ? `الأجهزة المعلقة:\n${deviceList}\n\nأدخل رقم الجهاز للموافقة:`
+              : `Pending Devices:\n${deviceList}\n\nEnter device number to approve:`
+          );
+
+          if (!deviceChoice) return;
+
+          const selectedIndex = parseInt(deviceChoice) - 1;
+          if (selectedIndex >= 0 && selectedIndex < pendingDevices.length) {
+            const selectedDevice = pendingDevices[selectedIndex];
+            const customName = prompt(
+              language === 'ar'
+                ? `أدخل اسم مخصص للجهاز ${selectedDevice.id} (اختياري):`
+                : `Enter custom name for device ${selectedDevice.id} (optional):`
+            );
+
+            await firebaseService.approveDevice(user.uid, selectedDevice.id, customName);
+            
+            const approvedMessage = language === 'ar'
+              ? `تمت الموافقة على الجهاز ${selectedDevice.id} بنجاح`
+              : `Device ${selectedDevice.id} approved successfully`;
+            alert(approvedMessage);
+            
+            // إضافة المزرعة إلى القائمة
+            addFarm(selectedDevice.id);
+          }
+          return;
+
+        case '3':
+          // إدخال معرف جهاز يدوياً (للأجهزة المصرح بها مسبقاً)
+          deviceId = prompt(
+            language === 'ar' 
+              ? 'أدخل معرف الجهاز المصرح به:' 
+              : 'Enter authorized device ID:'
+          );
+          if (!deviceId) return;
+
+          const trimmedId = deviceId.trim();
+          
+          // التحقق من ترخيص الجهاز وملكيته للمستخدم
+          const authorization = await firebaseService.checkDeviceAuthorization(trimmedId);
+          if (authorization && authorization.clientId === user.uid) {
+            addFarm(trimmedId);
+            const successMessage = language === 'ar' 
+              ? `تم إضافة المزرعة ${trimmedId} بنجاح` 
+              : `Farm ${trimmedId} added successfully`;
+            alert(successMessage);
+          } else {
+            const errorMessage = language === 'ar'
+              ? `الجهاز ${trimmedId} غير مصرح به أو لا ينتمي لحسابك`
+              : `Device ${trimmedId} is not authorized or does not belong to your account`;
+            alert(errorMessage);
+          }
+          return;
+
+        default:
+          const invalidMessage = language === 'ar'
+            ? 'اختيار غير صحيح'
+            : 'Invalid choice';
+          alert(invalidMessage);
       }
     } catch (error) {
-      console.error('Error adding farm:', error);
+      console.error('Error in handleAddFarm:', error);
       const errorMessage = language === 'ar'
         ? 'حدث خطأ أثناء إضافة المزرعة'
         : 'Error adding farm';
@@ -66,7 +202,16 @@ const Header = () => {
     }
   };
 
+  // 🔥 الإصلاح الرئيسي: دالة إضافة الوحدة محسنة
   const handleAddUnit = async () => {
+    if (!user) {
+      const message = language === 'ar' 
+        ? 'يجب تسجيل الدخول أولاً' 
+        : 'Please login first';
+      alert(message);
+      return;
+    }
+
     if (!currentDevice) {
       const message = language === 'ar' 
         ? 'يرجى اختيار جهاز أولاً' 
@@ -75,24 +220,42 @@ const Header = () => {
       return;
     }
 
-    if (!isSettingsMode) {
-      const message = language === 'ar'
-        ? 'يرجى تفعيل وضع الإعدادات الهيكلية أولاً'
-        : 'Please enable structural settings mode first';
-      alert(message);
-      return;
-    }
+     // ✅ النظام الجديد: ترقيم تسلسلي ذكي
+    const getNextAvailableUnitId = () => {
+      const existingUnits = Object.keys(unitsConfig || {});
+      
+      // استخراج جميع الأرقام المستخدمة
+      const usedNumbers = existingUnits.map(unitId => {
+        const match = unitId.match(/^unit_(\d+)$/);
+        return match ? parseInt(match[1]) : 0;
+      }).filter(num => num > 0);
 
-    let unitNumber = 1;
-    let newUnitId = `unit${unitNumber}`;
+      console.log('🔢 Used unit numbers:', usedNumbers);
+
+      // إذا لم توجد وحدات، نبدأ من 1
+      if (usedNumbers.length === 0) {
+        return 'unit_1';
+      }
+
+      // البحث عن أول رقم مفقود في التسلسل
+      for (let i = 1; i <= Math.max(...usedNumbers) + 1; i++) {
+        if (!usedNumbers.includes(i)) {
+          console.log(`🎯 Found available unit number: ${i}`);
+          return `unit_${i}`;
+        }
+      }
+
+      // إذا لم توجد فجوات، نستخدم الرقم التالي
+      const nextNumber = Math.max(...usedNumbers) + 1;
+      console.log(`📈 Using next sequential number: ${nextNumber}`);
+      return `unit_${nextNumber}`;
+    };
+
+    const newUnitId = getNextAvailableUnitId(); // ← السطر الجديد
+    console.log(`🆕 New unit ID: ${newUnitId}`);
     
-    while (unitsConfig && unitsConfig[newUnitId]) {
-      unitNumber++;
-      newUnitId = `unit${unitNumber}`;
-    }
-
     const defaultUnitSettings = {
-      name: language === 'ar' ? `الوحدة ${unitNumber}` : `Unit ${unitNumber}`,
+      name: language === 'ar' ? `وحدة جديدة` : `New Unit`,
       type: 'fan',
       status: false,
       mode: 'manual',
@@ -104,17 +267,36 @@ const Header = () => {
         }
       },
       startTime: '06:00',
-      endTime: '18:00'
+      endTime: '18:00',
+      createdAt: new Date().toISOString(),
+      createdBy: user.uid,
+      lastUpdate: new Date().toISOString()
     };
 
     try {
-      await firebaseService.addUnit(currentDevice, newUnitId, defaultUnitSettings);
+      console.log('🚀 Adding unit to Firebase:', {
+        userId: user.uid,
+        deviceId: currentDevice,
+        unitId: newUnitId,
+        unitData: defaultUnitSettings
+      });
+
+      await firebaseService.addUnit(user.uid, currentDevice, newUnitId, defaultUnitSettings);
+      
+      console.log('✅ Unit added successfully');
+      
       const successMessage = language === 'ar'
-        ? `تم إضافة الوحدة ${newUnitId} بنجاح`
-        : `Unit ${newUnitId} added successfully`;
+        ? `تم إضافة الوحدة الجديدة بنجاح`
+        : `New unit added successfully`;
       alert(successMessage);
+
+      // إعادة توجيه إلى صفحة الوحدات إذا لم نكن فيها
+      if (!isUnitsPage) {
+        router.push('/units');
+      }
+
     } catch (error) {
-      console.error('Error adding unit:', error);
+      console.error('❌ Error adding unit:', error);
       const errorMessage = language === 'ar'
         ? 'حدث خطأ أثناء إضافة الوحدة'
         : 'Error adding unit';
@@ -123,17 +305,32 @@ const Header = () => {
   };
 
   const handleNavigation = (page) => {
-    if (page === 'units') {
-      if (!currentDevice) {
-        const message = language === 'ar' 
-          ? 'يرجى اختيار جهاز أولاً' 
-          : 'Please select a device first';
-        alert(message);
-        return;
-      }
-      window.location.href = '/units';
-    } else {
-      window.location.href = '/';
+    if (!user) {
+      const message = language === 'ar' 
+        ? 'يجب تسجيل الدخول أولاً' 
+        : 'Please login first';
+      alert(message);
+      return;
+    }
+
+    switch (page) {
+      case 'units':
+        if (!currentDevice) {
+          const message = language === 'ar' 
+            ? 'يرجى اختيار جهاز أولاً' 
+            : 'Please select a device first';
+          alert(message);
+          return;
+        }
+        router.push('/units');
+        break;
+      case 'pending':
+        router.push('/devices/pending');
+        break;
+      case 'dashboard':
+      default:
+        router.push('/');
+        break;
     }
   };
 
@@ -166,7 +363,16 @@ const Header = () => {
       welcome: "مرحباً",
       selectFarm: "اختر مزرعة",
       farms: "المزارع",
-      noFarms: "لا توجد مزارع"
+      noFarms: "لا توجد مزارع",
+      pendingDevices: "الأجهزة المعلقة",
+      pendingDevicesPage: "صفحة الأجهزة المعلقة",
+      approveDevice: "موافقة على جهاز",
+      userWelcome: "مرحباً",
+      managePending: "إدارة الأجهزة المعلقة",
+      // 🔥 إضافة ترجمات جديدة
+      smartUnits: "الوحدات الذكية",
+      goToUnits: "الذهاب للوحدات",
+      addNewUnit: "إضافة وحدة جديدة"
     },
     en: {
       pageTitle: "Smart Poultry Farm",
@@ -184,18 +390,52 @@ const Header = () => {
       welcome: "Welcome",
       selectFarm: "Select Farm",
       farms: "Farms",
-      noFarms: "No farms"
+      noFarms: "No farms",
+      pendingDevices: "Pending Devices",
+      pendingDevicesPage: "Pending Devices Page",
+      approveDevice: "Approve Device",
+      userWelcome: "Welcome",
+      managePending: "Manage Pending Devices",
+      // 🔥 إضافة ترجمات جديدة
+      smartUnits: "Smart Units",
+      goToUnits: "Go to Units",
+      addNewUnit: "Add New Unit"
     }
   };
 
   const t = translations[language];
 
+  // تحديد عنوان الصفحة الحالية
+  const getPageTitle = () => {
+    if (isUnitsPage) return t.smartUnits;
+    if (isPendingPage) return t.pendingDevicesPage;
+    return t.pageTitle;
+  };
+
   return (
     <div className="header">
-      <h1>
-        <i className="fas fa-tractor"></i>
-        {isUnitsPage ? t.unitsControl : t.pageTitle}
-      </h1>
+      <div className="header-main">
+        <h1>
+          <i className="fas fa-tractor"></i>
+          {getPageTitle()}
+        </h1>
+        
+        <div className="user-section">
+          <div className="user-info">
+            <span className="welcome-text">
+              {t.userWelcome}, <strong>{userData?.name || user?.email?.split('@')[0]}</strong>
+            </span>
+          </div>
+          
+          <button 
+            className="nav-btn secondary logout-btn"
+            onClick={handleLogout}
+          >
+            <i className="fas fa-sign-out-alt"></i>
+            <span>{t.logout}</span>
+          </button>
+        </div>
+      </div>
       
       <div className="controls">
         {/* اختيار المزرعة */}
@@ -231,10 +471,13 @@ const Header = () => {
           </select>
         </div>
         
-        {/* زر إضافة مزرعة */}
-        <button className="nav-btn" onClick={handleAddFarm}>
+        {/* زر إضافة مزرعة مع مؤشر للأجهزة المعلقة */}
+        <button className="nav-btn add-farm-btn" onClick={handleAddFarm}>
           <i className="fas fa-plus"></i>
           <span>{t.addFarm}</span>
+          {pendingDevicesCount > 0 && (
+            <span className="pending-badge">{pendingDevicesCount}</span>
+          )}
         </button>
         
         {/* حالة الاتصال */}
@@ -257,13 +500,6 @@ const Header = () => {
         
         {/* أزرار التنقل */}
         <div className="nav-buttons">
-          {/* معلومات المستخدم */}
-          <div className="user-info">
-            <span className="welcome-text">
-              {t.welcome}, {user?.email?.split('@')[0]}
-            </span>
-          </div>
-          
           {/* وضع الإعدادات */}
           <button 
             className={`nav-btn settings ${isSettingsMode ? 'active' : ''}`}
@@ -276,21 +512,23 @@ const Header = () => {
           </button>
           
           {/* التنقل بين الصفحات */}
-          {!isUnitsPage ? (
+          {isPendingPage ? (
+            // في صفحة الأجهزة المعلقة - عرض زر العودة فقط
             <button 
-              className="nav-btn"
-              onClick={() => handleNavigation('units')}
+              className="nav-btn secondary"
+              onClick={() => handleNavigation('dashboard')}
             >
-              <i className="fas fa-fan"></i>
-              <span>{t.unitsControl}</span>
+              <i className="fas fa-arrow-left"></i>
+              <span>{t.backToDashboard}</span>
             </button>
-          ) : (
+          ) : isUnitsPage ? (
+            // في صفحة الوحدات
             <>
               <button 
                 className="nav-btn secondary"
                 onClick={() => handleNavigation('dashboard')}
               >
-                <i className="fas fa-arrow-right"></i>
+                <i className="fas fa-arrow-left"></i>
                 <span>{t.backToDashboard}</span>
               </button>
               <button 
@@ -298,19 +536,44 @@ const Header = () => {
                 onClick={handleAddUnit}
               >
                 <i className="fas fa-plus"></i>
-                <span>{t.addUnit}</span>
+                <span>{t.addNewUnit}</span>
+              </button>
+            </>
+          ) : (
+            // في الصفحة الرئيسية
+            <>
+              <button 
+                className="nav-btn"
+                onClick={() => handleNavigation('units')}
+              >
+                <i className="fas fa-fan"></i>
+                <span>{t.goToUnits}</span>
+              </button>
+              
+              {/* 🔥 الإصلاح: زر إضافة وحدة في الصفحة الرئيسية أيضًا */}
+              {currentDevice && (
+                <button 
+                  className="nav-btn"
+                  onClick={handleAddUnit}
+                >
+                  <i className="fas fa-plus"></i>
+                  <span>{t.addNewUnit}</span>
+                </button>
+              )}
+              
+              {/* زر الأجهزة المعلقة */}
+              <button 
+                className="nav-btn pending-btn"
+                onClick={() => handleNavigation('pending')}
+              >
+                <i className="fas fa-clock"></i>
+                <span>{t.pendingDevices}</span>
+                {pendingDevicesCount > 0 && (
+                  <span className="nav-badge">{pendingDevicesCount}</span>
+                )}
               </button>
             </>
           )}
-          
-          {/* تسجيل الخروج */}
-          <button 
-            className="nav-btn secondary"
-            onClick={handleLogout}
-          >
-            <i className="fas fa-sign-out-alt"></i>
-            <span>{t.logout}</span>
-          </button>
         </div>
       </div>
 
@@ -318,9 +581,15 @@ const Header = () => {
         .header {
           background: var(--white-card);
           border-radius: 12px;
-          padding: 15px 30px;
+          padding: 20px 30px;
           margin-bottom: 25px;
           box-shadow: var(--shadow-soft);
+          display: flex;
+          flex-direction: column;
+          gap: 20px;
+        }
+
+        .header-main {
           display: flex;
           justify-content: space-between;
           align-items: center;
@@ -338,10 +607,34 @@ const Header = () => {
           margin: 0;
         }
 
+        .user-section {
+          display: flex;
+          align-items: center;
+          gap: 15px;
+        }
+
+        .user-info {
+          display: flex;
+          align-items: center;
+          padding: 8px 15px;
+          background: #f8f9fa;
+          border-radius: 20px;
+          font-size: 14px;
+        }
+
+        .welcome-text {
+          color: var(--text-dark);
+          font-weight: 500;
+        }
+
+        .welcome-text strong {
+          color: var(--primary);
+        }
+
         .controls {
           display: flex;
           align-items: center;
-          gap: 20px;
+          gap: 15px;
           flex-wrap: wrap;
         }
 
@@ -377,10 +670,12 @@ const Header = () => {
           display: flex;
           align-items: center;
           gap: 5px;
+          position: relative;
         }
 
         .nav-btn:hover {
           background: var(--primary-dark);
+          transform: translateY(-1px);
         }
 
         .nav-btn.secondary {
@@ -399,10 +694,51 @@ const Header = () => {
           background: #138496;
         }
 
+        .nav-btn.pending-btn {
+          background: #f59e0b;
+        }
+
+        .nav-btn.pending-btn:hover {
+          background: #d97706;
+        }
+
         .nav-btn.settings.active {
           background: var(--warning);
           box-shadow: 0 0 0 2px rgba(255, 165, 0, 0.3);
           animation: glow 2s infinite;
+        }
+
+        .add-farm-btn {
+          position: relative;
+        }
+
+        .pending-badge,
+        .nav-badge {
+          position: absolute;
+          top: -5px;
+          right: -5px;
+          background: var(--danger);
+          color: white;
+          border-radius: 50%;
+          width: 18px;
+          height: 18px;
+          font-size: 10px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-weight: bold;
+        }
+
+        .nav-badge {
+          background: #f59e0b;
+        }
+
+        .logout-btn {
+          background: var(--danger);
+        }
+
+        .logout-btn:hover {
+          background: #c82333;
         }
 
         @keyframes glow {
@@ -449,22 +785,8 @@ const Header = () => {
           flex-wrap: wrap;
         }
 
-        .user-info {
-          display: flex;
-          align-items: center;
-          padding: 8px 15px;
-          background: #f8f9fa;
-          border-radius: 20px;
-          font-size: 14px;
-        }
-
-        .welcome-text {
-          color: var(--text-dark);
-          font-weight: 500;
-        }
-
         @media (max-width: 1200px) {
-          .header {
+          .header-main {
             flex-direction: column;
             align-items: stretch;
           }
@@ -508,7 +830,7 @@ const Header = () => {
             justify-content: center;
           }
 
-          .user-info {
+          .user-section {
             order: -1;
             width: 100%;
             justify-content: center;

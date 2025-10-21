@@ -1,10 +1,12 @@
 // components/units/UnitCard.js
 import React, { useState, useContext } from 'react';
 import { AppContext } from '../../contexts/AppContext';
+import { useAuth } from '../../contexts/AuthContext';
 import { firebaseService } from '../../hooks/useFirebase';
 
 const UnitCard = ({ unitId, unitData }) => {
   const { currentDevice, isSettingsMode, language, SENSOR_INFO, UNIT_TYPES } = useContext(AppContext);
+  const { user } = useAuth();
   const [isEditingName, setIsEditingName] = useState(false);
   const [unitName, setUnitName] = useState(unitData.name || unitId);
   const [loading, setLoading] = useState(false);
@@ -78,7 +80,8 @@ const UnitCard = ({ unitId, unitData }) => {
 
     setLoading(true);
     try {
-      await firebaseService.deleteUnit(currentDevice, unitId);
+      console.log('🗑️ Deleting unit:', { userId: user.uid, deviceId: currentDevice, unitId });
+      await firebaseService.deleteUnit(user.uid, currentDevice, unitId);
     } catch (error) {
       console.error('Error deleting unit:', error);
       alert(t.error);
@@ -97,7 +100,8 @@ const UnitCard = ({ unitId, unitData }) => {
 
     setLoading(true);
     try {
-      await firebaseService.updateUnit(currentDevice, unitId, { name: unitName.trim() });
+      console.log('✏️ Updating unit name:', { userId: user.uid, deviceId: currentDevice, unitId, name: unitName.trim() });
+      await firebaseService.updateUnit(user.uid, currentDevice, unitId, { name: unitName.trim() });
       setIsEditingName(false);
     } catch (error) {
       console.error('Error updating unit name:', error);
@@ -124,7 +128,8 @@ const UnitCard = ({ unitId, unitData }) => {
 
     setLoading(true);
     try {
-      await firebaseService.updateUnit(currentDevice, unitId, { type: newType });
+      console.log('🔄 Changing unit type:', { userId: user.uid, deviceId: currentDevice, unitId, newType });
+      await firebaseService.updateUnit(user.uid, currentDevice, unitId, { type: newType });
     } catch (error) {
       console.error('Error updating unit type:', error);
       alert(t.error);
@@ -136,7 +141,8 @@ const UnitCard = ({ unitId, unitData }) => {
   const handleModeChange = async (newMode) => {
     setLoading(true);
     try {
-      await firebaseService.updateUnit(currentDevice, unitId, { mode: newMode });
+      console.log('🔄 Changing unit mode:', { userId: user.uid, deviceId: currentDevice, unitId, newMode });
+      await firebaseService.updateUnit(user.uid, currentDevice, unitId, { mode: newMode });
     } catch (error) {
       console.error('Error updating unit mode:', error);
       alert(t.error);
@@ -148,7 +154,8 @@ const UnitCard = ({ unitId, unitData }) => {
   const handleToggleUnit = async (isOn) => {
     setLoading(true);
     try {
-      await firebaseService.updateUnit(currentDevice, unitId, { status: isOn });
+      console.log('🔌 Toggling unit status:', { userId: user.uid, deviceId: currentDevice, unitId, isOn });
+      await firebaseService.updateUnit(user.uid, currentDevice, unitId, { status: isOn });
     } catch (error) {
       console.error('Error toggling unit:', error);
       alert(t.error);
@@ -165,7 +172,8 @@ const UnitCard = ({ unitId, unitData }) => {
 
     setLoading(true);
     try {
-      await firebaseService.updateUnit(currentDevice, unitId, { sensors: newSensors });
+      console.log('🎯 Updating unit sensors:', { userId: user.uid, deviceId: currentDevice, unitId, newSensors });
+      await firebaseService.updateUnit(user.uid, currentDevice, unitId, { sensors: newSensors });
     } catch (error) {
       console.error('Error updating sensors:', error);
       alert(t.error);
@@ -188,7 +196,8 @@ const UnitCard = ({ unitId, unitData }) => {
 
     setLoading(true);
     try {
-      await firebaseService.updateUnit(currentDevice, unitId, { thresholds: newThresholds });
+      console.log('📊 Updating thresholds:', { userId: user.uid, deviceId: currentDevice, unitId, sensorKey, type, value });
+      await firebaseService.updateUnit(user.uid, currentDevice, unitId, { thresholds: newThresholds });
     } catch (error) {
       console.error('Error updating thresholds:', error);
       alert(t.error);
@@ -200,7 +209,8 @@ const UnitCard = ({ unitId, unitData }) => {
   const handleTimerUpdate = async (type, value) => {
     setLoading(true);
     try {
-      await firebaseService.updateUnit(currentDevice, unitId, { [type]: value });
+      console.log('⏰ Updating timer:', { userId: user.uid, deviceId: currentDevice, unitId, type, value });
+      await firebaseService.updateUnit(user.uid, currentDevice, unitId, { [type]: value });
     } catch (error) {
       console.error('Error updating timer:', error);
       alert(t.error);
@@ -230,7 +240,8 @@ const UnitCard = ({ unitId, unitData }) => {
 
     setLoading(true);
     try {
-      await firebaseService.updateUnit(currentDevice, unitId, defaultSettings);
+      console.log('🔄 Resetting unit settings:', { userId: user.uid, deviceId: currentDevice, unitId });
+      await firebaseService.updateUnit(user.uid, currentDevice, unitId, defaultSettings);
       setUnitName(unitId);
       setIsEditingName(false);
     } catch (error) {

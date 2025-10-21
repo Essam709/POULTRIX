@@ -5,43 +5,123 @@ import {
   signInWithEmailAndPassword, 
   createUserWithEmailAndPassword,
   signInWithPopup,
-  GoogleAuthProvider,
+  googleProvider,
   signOut,
   onAuthStateChanged,
   sendPasswordResetEmail,
-  updateProfile
+  updateProfile,
+  firebaseService
 } from '../hooks/useFirebase';
 
-const googleProvider = new GoogleAuthProvider();
 export const AuthContext = createContext();
 
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
+  const [userData, setUserData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+
+  // دالة لتحميل بيانات المستخدم الإضافية
+  const loadUserData = async (user) => {
+    try {
+      if (!user) {
+        setUserData(null);
+        return;
+      }
+
+      console.log('👤 Loading user data for:', user.uid);
+      
+      // الحصول على بيانات المستخدم من قاعدة البيانات
+      const userInfo = await firebaseService.getData(user.uid, 'info');
+      if (userInfo) {
+        console.log('✅ User data loaded:', userInfo);
+        setUserData(userInfo);
+      } else {
+        // إذا لم توجد بيانات، ننشئها
+        console.log('🆕 Creating new user data');
+        const userInfoData = {
+          name: user.displayName || user.email.split('@')[0],
+          email: user.email,
+          createdAt: new Date().toISOString(),
+          lastLogin: new Date().toISOString()
+        };
+        
+        await firebaseService.setData(user.uid, 'info', userInfoData);
+        setUserData(userInfoData);
+        console.log('✅ New user data created');
+      }
+    } catch (error) {
+      console.error('❌ Error loading user data:', error);
+    }
+  };
 
   useEffect(() => {
     // التحقق من توفر auth قبل الاشتراك
     if (!auth) {
-      console.error('Firebase Auth is not available');
+      console.error('❌ Firebase Auth is not available');
       setLoading(false);
       return;
     }
 
+    console.log('🔐 Initializing auth state listener');
+    
     const unsubscribe = onAuthStateChanged(auth, 
-      (user) => {
+      async (user) => {
+        console.log('🔄 Auth state changed:', user ? `User: ${user.uid}` : 'No user');
         setUser(user);
+        
+        if (user) {
+          // تحميل بيانات المستخدم الإضافية
+          await loadUserData(user);
+        } else {
+          setUserData(null);
+        }
+        
         setLoading(false);
       },
       (error) => {
-        console.error('Auth state change error:', error);
+        console.error('❌ Auth state change error:', error);
         setError(getAuthErrorMessage(error.code));
         setLoading(false);
       }
     );
 
-    return () => unsubscribe();
+    return () => {
+      console.log('🧹 Cleaning up auth listener');
+      unsubscribe();
+    };
   }, []);
+
+  // إنشاء بيانات المستخدم في قاعدة البيانات
+  const createUserInDatabase = async (user, additionalData = {}) => {
+    try {
+      const userInfo = {
+        name: user.displayName || additionalData.name || user.email.split('@')[0],
+        email: user.email,
+        createdAt: new Date().toISOString(),
+        lastLogin: new Date().toISOString(),
+        ...additionalData
+      };
+
+      console.log('📝 Creating user in database:', user.uid);
+      
+      // إنشاء بيانات المستخدم في المسار الجديد
+      await firebaseService.setData(user.uid, 'info', userInfo);
+      
+      // إنشاء الهيكل الأساسي للمستخدم
+      await Promise.all([
+        firebaseService.setData(user.uid, 'devices', {}),
+        firebaseService.setData(user.uid, 'farms', {}),
+        firebaseService.setData(user.uid, 'settings', {})
+      ]);
+
+      console.log('✅ User created in database successfully');
+      return userInfo;
+    } catch (error) {
+      console.error('❌ Error creating user in database:', error);
+      throw error;
+    }
+  };
 
   const loginWithEmail = async (email, password) => {
     try {
@@ -52,10 +132,21 @@ export const AuthProvider = ({ children }) => {
         throw new Error('خدمة المصادقة غير متاحة حالياً');
       }
       
+      console.log('🔐 Attempting email login:', email);
       const result = await signInWithEmailAndPassword(auth, email, password);
+      
+      // تحديث وقت آخر تسجيل دخول
+      if (result.user) {
+        await firebaseService.updateData(result.user.uid, 'info', {
+          lastLogin: new Date().toISOString()
+        });
+        console.log('✅ Email login successful:', result.user.uid);
+      }
+      
       return result;
     } catch (error) {
       const errorMessage = getAuthErrorMessage(error.code);
+      console.error('❌ Email login error:', errorMessage);
       setError(errorMessage);
       throw new Error(errorMessage);
     } finally {
@@ -63,7 +154,7 @@ export const AuthProvider = ({ children }) => {
     }
   };
 
-  const signupWithEmail = async (email, password, displayName) => {
+  const signupWithEmail = async (email, password, userData = {}) => {
     try {
       setError('');
       setLoading(true);
@@ -72,15 +163,30 @@ export const AuthProvider = ({ children }) => {
         throw new Error('خدمة المصادقة غير متاحة حالياً');
       }
       
+      console.log('👤 Attempting email signup:', email);
       const result = await createUserWithEmailAndPassword(auth, email, password);
       
-      if (displayName && result.user) {
-        await updateProfile(result.user, { displayName });
+      if (result.user) {
+        // تحديث الاسم في Firebase Auth إذا كان موجوداً
+        if (userData.name) {
+          await updateProfile(result.user, { 
+            displayName: userData.name 
+          });
+        }
+
+        // إنشاء بيانات المستخدم في قاعدة البيانات
+        await createUserInDatabase(result.user, userData);
+        
+        // تحميل بيانات المستخدم الجديدة
+        await loadUserData(result.user);
+        
+        console.log('✅ Email signup successful:', result.user.uid);
       }
       
       return result;
     } catch (error) {
       const errorMessage = getAuthErrorMessage(error.code);
+      console.error('❌ Email signup error:', errorMessage);
       setError(errorMessage);
       throw new Error(errorMessage);
     } finally {
@@ -97,10 +203,34 @@ export const AuthProvider = ({ children }) => {
         throw new Error('خدمة المصادقة غير متاحة حالياً');
       }
       
+      console.log('🔐 Attempting Google login');
       const result = await signInWithPopup(auth, googleProvider);
+      
+      if (result.user) {
+        // التحقق مما إذا كان المستخدم جديداً
+        const isNewUser = result._tokenResponse?.isNewUser;
+        
+        if (isNewUser) {
+          console.log('🆕 New Google user, creating database entry');
+          // إنشاء بيانات المستخدم في قاعدة البيانات للمستخدم الجديد
+          await createUserInDatabase(result.user);
+        } else {
+          console.log('👤 Existing Google user, updating login time');
+          // تحديث وقت آخر تسجيل دخول للمستخدم الحالي
+          await firebaseService.updateData(result.user.uid, 'info', {
+            lastLogin: new Date().toISOString()
+          });
+        }
+        
+        // تحميل بيانات المستخدم
+        await loadUserData(result.user);
+        console.log('✅ Google login successful:', result.user.uid);
+      }
+      
       return result;
     } catch (error) {
       const errorMessage = getAuthErrorMessage(error.code);
+      console.error('❌ Google login error:', errorMessage);
       setError(errorMessage);
       throw new Error(errorMessage);
     } finally {
@@ -116,9 +246,21 @@ export const AuthProvider = ({ children }) => {
         throw new Error('خدمة المصادقة غير متاحة حالياً');
       }
       
+      console.log('🚪 Attempting logout');
+      
+      // تحديث وقت آخر تسجيل خروج
+      if (user) {
+        await firebaseService.updateData(user.uid, 'info', {
+          lastLogout: new Date().toISOString()
+        });
+      }
+      
       await signOut(auth);
+      setUserData(null);
+      console.log('✅ Logout successful');
     } catch (error) {
       const errorMessage = getAuthErrorMessage(error.code);
+      console.error('❌ Logout error:', errorMessage);
       setError(errorMessage);
       throw new Error(errorMessage);
     }
@@ -133,13 +275,50 @@ export const AuthProvider = ({ children }) => {
         throw new Error('خدمة المصادقة غير متاحة حالياً');
       }
       
+      console.log('📧 Sending password reset email:', email);
       await sendPasswordResetEmail(auth, email);
+      console.log('✅ Password reset email sent');
     } catch (error) {
       const errorMessage = getAuthErrorMessage(error.code);
+      console.error('❌ Password reset error:', errorMessage);
       setError(errorMessage);
       throw new Error(errorMessage);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const updateUserProfile = async (updates) => {
+    try {
+      setError('');
+      
+      if (!user) {
+        throw new Error('يجب تسجيل الدخول أولاً');
+      }
+
+      console.log('✏️ Updating user profile:', user.uid);
+      
+      // تحديث البيانات في Firebase Auth إذا كان هناك displayName
+      if (updates.name) {
+        await updateProfile(user, { displayName: updates.name });
+      }
+
+      // تحديث البيانات في قاعدة البيانات
+      await firebaseService.updateData(user.uid, 'info', {
+        ...updates,
+        updatedAt: new Date().toISOString()
+      });
+
+      // إعادة تحميل بيانات المستخدم
+      await loadUserData(user);
+      
+      console.log('✅ User profile updated successfully');
+      
+    } catch (error) {
+      const errorMessage = getAuthErrorMessage(error.code);
+      console.error('❌ Profile update error:', errorMessage);
+      setError(errorMessage);
+      throw new Error(errorMessage);
     }
   };
 
@@ -188,6 +367,7 @@ export const AuthProvider = ({ children }) => {
 
   const value = {
     user,
+    userData,
     loading,
     error,
     loginWithEmail,
@@ -195,8 +375,10 @@ export const AuthProvider = ({ children }) => {
     loginWithGoogle,
     logout,
     resetPassword,
+    updateUserProfile,
     clearError,
-    isAuthAvailable: !!auth
+    isAuthAvailable: !!auth,
+    refreshUserData: () => loadUserData(user)
   };
 
   return (

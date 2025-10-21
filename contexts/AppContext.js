@@ -1,11 +1,12 @@
 // contexts/AppContext.js
 import React, { createContext, useState, useContext, useEffect } from 'react';
 import { firebaseService } from '../hooks/useFirebase';
+import { useAuth } from './AuthContext';
 
 const AppContext = createContext();
 
 export function AppProvider({ children }) {
-  // الحالات الأساسية
+  const { user, loading: authLoading } = useAuth();
   const [currentDevice, setCurrentDevice] = useState(null);
   const [deviceData, setDeviceData] = useState(null);
   const [sensorData, setSensorData] = useState({});
@@ -15,12 +16,8 @@ export function AppProvider({ children }) {
   const [devicesList, setDevicesList] = useState([]);
   const [loading, setLoading] = useState(true);
   const [isConnected, setIsConnected] = useState(false);
-
-  // نظام المزارع الجديد
   const [farms, setFarms] = useState([]);
   const [currentFarm, setCurrentFarm] = useState(null);
-
-  // نظام الوحدات الذكية
   const [unitsConfig, setUnitsConfig] = useState({});
   const [isSettingsMode, setIsSettingsMode] = useState(false);
 
@@ -134,89 +131,314 @@ export function AppProvider({ children }) {
   useEffect(() => {
     if (!firebaseService) return;
 
-    const unsubscribe = firebaseService.checkConnection((connected) => {
+    const unsubscribe = firebaseService.isConnected((connected) => {
       setIsConnected(connected);
     });
 
     return () => unsubscribe();
   }, []);
 
-  // تحميل قائمة الأجهزة
+  // 🔍 useEffect تشخيصي لتتبع حالة التحميل
   useEffect(() => {
-    if (!firebaseService) {
+    console.log('🔍 [DEBUG] AppContext Loading State:', {
+      user: user?.uid,
+      currentDevice,
+      authLoading,
+      appLoading: loading,
+      unitsCount: Object.keys(unitsConfig).length,
+      hasFirebase: !!firebaseService
+    });
+  }, [user, currentDevice, authLoading, loading, unitsConfig]);
+
+  // 🔍 useEffect لتتبع تغييرات user بالتفصيل
+  useEffect(() => {
+    console.log('👤 [DEBUG] User State Changed:', {
+      user: user ? {
+        uid: user.uid,
+        email: user.email,
+        isAuthenticated: true
+      } : 'No user',
+      authLoading,
+      timestamp: new Date().toISOString()
+    });
+  }, [user, authLoading]);
+
+  // ✅ تحميل قائمة أجهزة المستخدم - مع تحسينات التحميل
+  useEffect(() => {
+    if (authLoading) {
+      console.log('⏳ [DEVICES] Auth still loading, waiting...');
+      return;
+    }
+
+    if (!firebaseService || !user) {
+      console.log('❌ [DEVICES] Missing firebaseService or user for devices:', {
+        hasFirebase: !!firebaseService,
+        hasUser: !!user,
+        userId: user?.uid,
+        authLoading
+      });
       setLoading(false);
       return;
     }
 
-    const unsubscribe = firebaseService.listenToData('devices', (snapshot) => {
-      const data = snapshot.val();
-      if (data) {
-        const devices = Object.keys(data);
-        setDevicesList(devices);
+    console.log('📋 [DEVICES] Loading user devices for:', user.uid);
+    
+    const unsubscribe = firebaseService.getUserDevices(
+      user.uid, 
+      (snapshot) => {
+        const data = snapshot.val();
+        console.log('📱 [DEVICES] User devices data received:', data);
         
-        // إذا لم يكن هناك جهاز محدد، اختر الأول
-        if (!currentDevice && devices.length > 0) {
-          setCurrentDevice(devices[0]);
+        if (data) {
+          const devices = Object.keys(data);
+          console.log('✅ [DEVICES] Devices list loaded:', devices);
+          setDevicesList(devices);
+          
+          // إذا لم يكن هناك جهاز محدد، اختر الأول
+          if (!currentDevice && devices.length > 0) {
+            console.log('🎯 [DEVICES] Auto-selecting first device:', devices[0]);
+            setCurrentDevice(devices[0]);
+          }
+        } else {
+          console.log('⚠️ [DEVICES] No devices found for user');
+          setDevicesList([]);
         }
+        setLoading(false);
+      },
+      (error) => {
+        console.error('❌ [DEVICES] Error loading user devices:', error);
+        setLoading(false);
       }
-      setLoading(false);
+    );
+
+    return () => {
+      console.log('🧹 [DEVICES] Unsubscribing from user devices');
+      unsubscribe();
+    };
+  }, [user, currentDevice, authLoading]);
+
+  // ✅ تحميل بيانات الجهاز الحالي - مع تحسينات التحميل
+  useEffect(() => {
+    if (authLoading) {
+      console.log('⏳ [DEVICE DATA] Auth still loading, waiting...');
+      return;
+    }
+
+    if (!currentDevice || !firebaseService || !user) {
+      console.log('❌ [DEVICE DATA] Missing data for device subscription:', {
+        currentDevice,
+        firebaseService: !!firebaseService,
+        user: !!user,
+        userId: user?.uid,
+        authLoading
+      });
+      return;
+    }
+
+    console.log('📡 [DEVICE DATA] Subscribing to device data:', currentDevice);
+    
+    const unsubscribe = firebaseService.listenToData(
+      user.uid, 
+      `devices/${currentDevice}`, 
+      (snapshot) => {
+        const data = snapshot.val();
+        console.log('📊 [DEVICE DATA] Device data received:', data);
+        
+        setDeviceData(data);
+        
+        if (data && data.sensors) {
+          console.log('🎯 [DEVICE DATA] Sensor data updated:', data.sensors);
+          setSensorData(data.sensors);
+        } else {
+          console.log('⚠️ [DEVICE DATA] No sensor data in device data');
+          setSensorData({});
+        }
+      },
+      (error) => {
+        console.error('❌ [DEVICE DATA] Error in device data subscription:', error);
+      }
+    );
+
+    return () => {
+      console.log('🧹 [DEVICE DATA] Unsubscribing from device data');
+      unsubscribe();
+    };
+  }, [user, currentDevice, authLoading]);
+
+  // ✅ الإصلاح النهائي: تحميل إعدادات الوحدات مع تأخير ذكي
+  useEffect(() => {
+    console.log('🎯 [UNITS] useEffect triggered:', {
+      user: user?.uid,
+      currentDevice,
+      authLoading,
+      hasFirebase: !!firebaseService
     });
 
-    return () => unsubscribe();
-  }, [currentDevice]);
+    if (authLoading) {
+      console.log('⏳ [UNITS] Auth still loading, waiting...');
+      return;
+    }
 
-  // تحميل بيانات الجهاز الحالي
-  useEffect(() => {
-    if (!currentDevice || !firebaseService) return;
+    if (!user) {
+      console.log('❌ [UNITS] No user available, skipping subscription');
+      setUnitsConfig({});
+      return;
+    }
 
-    const unsubscribe = firebaseService.listenToData(`devices/${currentDevice}`, (snapshot) => {
-      const data = snapshot.val();
-      setDeviceData(data);
+    if (!currentDevice) {
+      console.log('❌ [UNITS] No device selected, skipping subscription');
+      setUnitsConfig({});
+      return;
+    }
+
+    if (!firebaseService) {
+      console.log('❌ [UNITS] Firebase service not available');
+      setUnitsConfig({});
+      return;
+    }
+
+    console.log('🚀 [UNITS] Starting subscription for:', {
+      userId: user.uid,
+      deviceId: currentDevice
+    });
+
+    let unsubscribe = null;
+    let subscriptionActive = true;
+
+    const startSubscription = () => {
+      if (!subscriptionActive) return;
+
+      console.log('📡 [UNITS] Setting up Firebase subscription...');
       
-      if (data && data.sensors) {
-        setSensorData(data.sensors);
+      unsubscribe = firebaseService.getDeviceUnits(
+        user.uid,
+        currentDevice,
+        (snapshot) => {
+          if (!subscriptionActive) return;
+          
+          const data = snapshot.val();
+          console.log('✅ [UNITS] Subscription data received:', {
+            dataExists: !!data,
+            unitsCount: data ? Object.keys(data).length : 0,
+            units: data ? Object.keys(data) : []
+          });
+          
+          setUnitsConfig(data || {});
+        },
+        (error) => {
+          if (!subscriptionActive) return;
+          console.error('❌ [UNITS] Subscription error:', error);
+          setUnitsConfig({});
+        }
+      );
+    };
+
+    // بدء الاشتراك بعد تأخير بسيط للتأكد من استقرار الحالة
+    const timer = setTimeout(startSubscription, 100);
+
+    return () => {
+      console.log('🧹 [UNITS] Cleaning up subscription');
+      subscriptionActive = false;
+      if (unsubscribe) {
+        unsubscribe();
       }
+      clearTimeout(timer);
+    };
+  }, [user, currentDevice, authLoading]);
+
+  // 🔥 الإصلاح: تحميل البيانات التاريخية للمستشعر الحالي
+  useEffect(() => {
+    console.log('📈 [HISTORICAL] useEffect triggered:', {
+      currentSensor,
+      currentDevice,
+      user: user?.uid,
+      authLoading
     });
 
-    return () => unsubscribe();
-  }, [currentDevice]);
+    if (authLoading) {
+      console.log('⏳ [HISTORICAL] Auth still loading, waiting...');
+      return;
+    }
 
-  // تحميل إعدادات الوحدات للجهاز الحالي
-  useEffect(() => {
-    if (!currentDevice || !firebaseService) return;
+    if (!currentDevice || !currentSensor || !firebaseService || !user) {
+      console.log('❌ [HISTORICAL] Missing data for subscription:', {
+        currentDevice: !!currentDevice,
+        currentSensor,
+        firebaseService: !!firebaseService,
+        user: !!user
+      });
+      return;
+    }
 
-    const unsubscribe = firebaseService.listenToData(`devices/${currentDevice}/units`, (snapshot) => {
-      const data = snapshot.val();
-      setUnitsConfig(data || {});
-    });
-
-    return () => unsubscribe();
-  }, [currentDevice]);
-
-  // تحميل البيانات التاريخية للمستشعر الحالي
-  useEffect(() => {
-    if (!currentDevice || !currentSensor || !firebaseService) return;
+    console.log('🚀 [HISTORICAL] Setting up subscription for sensor:', currentSensor);
 
     const unsubscribe = firebaseService.listenToHistoricalData(
+      user.uid,
       currentDevice,
       currentSensor,
       (snapshot) => {
         const data = snapshot.val();
+        console.log('✅ [HISTORICAL] Data received for sensor:', currentSensor, {
+          dataExists: !!data,
+          dataPoints: data ? Object.keys(data).length : 0,
+          sampleData: data ? Object.values(data).slice(0, 3) : []
+        });
+        
         if (data) {
           setHistoricalData(prev => ({
             ...prev,
             [currentSensor]: data
           }));
+        } else {
+          console.log('⚠️ [HISTORICAL] No data found for sensor:', currentSensor);
+          // ✅ الإصلاح: تعيين بيانات فارغة حتى لا تبقى البيانات القديمة
+          setHistoricalData(prev => ({
+            ...prev,
+            [currentSensor]: {}
+          }));
         }
+      },
+      (error) => {
+        console.error('❌ [HISTORICAL] Subscription error for sensor:', currentSensor, error);
       }
     );
 
-    return () => unsubscribe();
-  }, [currentDevice, currentSensor]);
+    return () => {
+      console.log('🧹 [HISTORICAL] Cleaning up subscription for sensor:', currentSensor);
+      unsubscribe();
+    };
+  }, [user, currentDevice, currentSensor, authLoading]);
+
+  // 🔍 إضافة useEffect تشخيصي للبيانات التاريخية
+  useEffect(() => {
+    console.log('📊 [HISTORICAL DIAGNOSTICS]', {
+      currentSensor,
+      availableSensors: Object.keys(historicalData),
+      currentSensorData: historicalData[currentSensor] ? Object.keys(historicalData[currentSensor]).length : 0,
+      allHistoricalData: historicalData
+    });
+  }, [historicalData, currentSensor]);
+
+  // إضافة useEffect لمراقبة تغييرات unitsConfig
+  useEffect(() => {
+    console.log('🔄 [UNITS CONFIG] unitsConfig updated:', {
+      count: Object.keys(unitsConfig).length,
+      units: Object.keys(unitsConfig)
+    });
+  }, [unitsConfig]);
+
+  // إضافة useEffect لمراقبة تغييرات sensorData
+  useEffect(() => {
+    console.log('🔄 [SENSOR DATA] sensorData updated:', {
+      count: Object.keys(sensorData).length,
+      sensors: Object.keys(sensorData),
+      values: sensorData
+    });
+  }, [sensorData]);
 
   // دوال إدارة المزارع
   const addFarm = async (deviceId) => {
-    if (!deviceId.trim()) return;
+    if (!deviceId.trim() || !user) return;
 
     const trimmedId = deviceId.trim();
     
@@ -226,10 +448,10 @@ export function AppProvider({ children }) {
       return;
     }
 
-    // التحقق من ترخيص الجهاز
+    // التحقق من ترخيص الجهاز وملكيته للمستخدم
     try {
-      const isAuthorized = await firebaseService.checkDeviceAuthorization(trimmedId);
-      if (isAuthorized) {
+      const authorization = await firebaseService.checkDeviceAuthorization(trimmedId);
+      if (authorization && authorization.clientId === user.uid) {
         const newFarms = [...farms, trimmedId];
         setFarms(newFarms);
         setCurrentFarm(trimmedId);
@@ -245,8 +467,8 @@ export function AppProvider({ children }) {
         alert(successMessage);
       } else {
         const errorMessage = language === 'ar'
-          ? `المزرعة ${trimmedId} غير متصلة أو غير مصرح بها`
-          : `Farm ${trimmedId} is not connected or not authorized`;
+          ? `الجهاز ${trimmedId} غير مصرح به أو لا ينتمي لحسابك`
+          : `Device ${trimmedId} is not authorized or does not belong to your account`;
         alert(errorMessage);
       }
     } catch (error) {
@@ -278,10 +500,10 @@ export function AppProvider({ children }) {
 
   // دوال إدارة الوحدات
   const addUnit = async (unitId, unitData) => {
-    if (!currentDevice || !firebaseService) return;
+    if (!currentDevice || !firebaseService || !user) return;
 
     try {
-      await firebaseService.addUnit(currentDevice, unitId, unitData);
+      await firebaseService.addUnit(user.uid, currentDevice, unitId, unitData);
     } catch (error) {
       console.error('Error adding unit:', error);
       throw error;
@@ -289,10 +511,10 @@ export function AppProvider({ children }) {
   };
 
   const updateUnit = async (unitId, updates) => {
-    if (!currentDevice || !firebaseService) return;
+    if (!currentDevice || !firebaseService || !user) return;
 
     try {
-      await firebaseService.updateUnit(currentDevice, unitId, updates);
+      await firebaseService.updateUnit(user.uid, currentDevice, unitId, updates);
     } catch (error) {
       console.error('Error updating unit:', error);
       throw error;
@@ -300,12 +522,100 @@ export function AppProvider({ children }) {
   };
 
   const deleteUnit = async (unitId) => {
-    if (!currentDevice || !firebaseService) return;
+    if (!currentDevice || !firebaseService || !user) return;
 
     try {
-      await firebaseService.deleteUnit(currentDevice, unitId);
+      await firebaseService.deleteUnit(user.uid, currentDevice, unitId);
     } catch (error) {
       console.error('Error deleting unit:', error);
+      throw error;
+    }
+  };
+
+  // دالة للتحقق من ملكية الجهاز
+  const checkDeviceOwnership = async (deviceId) => {
+    if (!user || !deviceId) return false;
+    
+    try {
+      return await firebaseService.checkUserDevice(user.uid, deviceId);
+    } catch (error) {
+      console.error('Error checking device ownership:', error);
+      return false;
+    }
+  };
+
+  // دالة لتحميل الأجهزة المعلقة
+  const loadPendingDevices = (callback) => {
+    if (!firebaseService) return () => {};
+    
+    return firebaseService.getPendingDevices(callback);
+  };
+
+  // دالة للموافقة على جهاز معلق
+  const approvePendingDevice = async (deviceId, customName = null) => {
+    if (!user || !deviceId) return;
+
+    try {
+      await firebaseService.approveDevice(user.uid, deviceId, customName);
+      
+      // إضافة الجهاز إلى قائمة المزارع بعد الموافقة
+      addFarm(deviceId);
+      
+      return true;
+    } catch (error) {
+      console.error('Error approving device:', error);
+      throw error;
+    }
+  };
+
+  // ✅ دالة لتحديث الوحدات يدوياً
+  const refreshUnits = async () => {
+    if (!currentDevice || !firebaseService || !user) {
+      console.log('❌ [REFRESH] Cannot refresh units: missing data');
+      return;
+    }
+
+    console.log('🔄 [REFRESH] Manual units refresh triggered');
+    try {
+      const unitsRef = firebaseService.getRef(`clients/${user.uid}/devices/${currentDevice}/units`);
+      const snapshot = await firebaseService.get(unitsRef);
+      const data = snapshot.val();
+      console.log('🔄 [REFRESH] Manual refresh data:', data);
+      setUnitsConfig(data || {});
+      return data;
+    } catch (error) {
+      console.error('❌ [REFRESH] Manual refresh error:', error);
+      throw error;
+    }
+  };
+
+  // ✅ دالة لتحديث البيانات التاريخية يدوياً
+  const refreshHistoricalData = async () => {
+    if (!currentDevice || !currentSensor || !firebaseService || !user) {
+      console.log('❌ [HISTORICAL REFRESH] Missing data for refresh');
+      return;
+    }
+
+    console.log('🔄 [HISTORICAL REFRESH] Manual refresh for sensor:', currentSensor);
+    
+    try {
+      const historyRef = firebaseService.getRef(`clients/${user.uid}/devices/${currentDevice}/history/${currentSensor}`);
+      const snapshot = await firebaseService.get(historyRef);
+      const data = snapshot.val();
+      
+      console.log('✅ [HISTORICAL REFRESH] Refresh completed:', {
+        sensor: currentSensor,
+        dataPoints: data ? Object.keys(data).length : 0
+      });
+      
+      setHistoricalData(prev => ({
+        ...prev,
+        [currentSensor]: data || {}
+      }));
+      
+      return data;
+    } catch (error) {
+      console.error('❌ [HISTORICAL REFRESH] Refresh failed:', error);
       throw error;
     }
   };
@@ -320,7 +630,18 @@ export function AppProvider({ children }) {
   };
 
   const value = {
-    // الحالة الأساسية
+    // إضافة debugging info
+    _debug: {
+      unitsCount: Object.keys(unitsConfig).length,
+      sensorsCount: Object.keys(sensorData).length,
+      hasDeviceData: !!deviceData,
+      currentDevice,
+      user: user?.uid,
+      authLoading
+    },
+    
+    // القيم الأساسية
+    user,
     currentDevice,
     deviceData,
     sensorData,
@@ -328,42 +649,36 @@ export function AppProvider({ children }) {
     language,
     historicalData,
     devicesList,
-    loading,
+    loading: loading || authLoading,
     isConnected,
-
-    // نظام المزارع
     farms,
     currentFarm,
-
-    // نظام الوحدات
     unitsConfig,
     isSettingsMode,
-
-    // الثوابت
     SENSOR_INFO,
     UNIT_TYPES,
-
-    // دوال الأساسية
+    
+    // الدوال
     setCurrentDevice,
     setDeviceData,
     setSensorData,
     setCurrentSensor,
     setLanguage,
     setHistoricalData,
-
-    // دوال المزارع
+    setDevicesList,
     addFarm,
     removeFarm,
     selectFarm,
-
-    // دوال الوحدات
     addUnit,
     updateUnit,
     deleteUnit,
-
-    // دوال مساعدة
+    checkDeviceOwnership,
+    loadPendingDevices,
+    approvePendingDevice,
     toggleSettingsMode,
-    selectSensor
+    selectSensor,
+    refreshUnits,
+    refreshHistoricalData // ✅ الإضافة: دالة تحديث البيانات التاريخية
   };
 
   return (
