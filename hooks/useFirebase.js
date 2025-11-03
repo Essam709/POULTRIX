@@ -1,4 +1,3 @@
-// hooks/useFirebase.js
 import { initializeApp } from "firebase/app";
 import { 
   getDatabase, 
@@ -592,6 +591,125 @@ const firebaseService = {
       console.error('Error backing up data:', error);
       throw error;
     }
+  },
+
+  // =============================================
+  // 🔥 نظام مراقبة حالة الأجهزة - الإضافات الجديدة
+  // =============================================
+
+  // 🔥 مراقبة حالة الجهاز في الوقت الحقيقي
+  listenToDeviceConnectivity: (uid, deviceId, callback, errorCallback = null) => {
+    console.log('📡 [CONNECTIVITY] Setting up connectivity listener for:', deviceId);
+    
+    const connectivityRef = ref(database, getDevicePath(uid, deviceId, 'connectivity'));
+    console.log('📍 Connectivity path:', getDevicePath(uid, deviceId, 'connectivity'));
+    
+    const unsubscribe = onValue(connectivityRef, 
+      (snapshot) => {
+        const data = snapshot.val();
+        console.log('✅ [CONNECTIVITY] Update received:', { deviceId, data });
+        
+        // حساب إذا كان الجهاز متصل (آخر تحديث منذ أقل من دقيقة)
+        const isConnected = data && data.lastSeen ? 
+          (Date.now() - new Date(data.lastSeen).getTime()) < 60000 : false;
+        
+        callback({
+          isConnected,
+          lastSeen: data?.lastSeen || null,
+          status: isConnected ? 'online' : 'offline',
+          timestamp: new Date().toISOString()
+        });
+      },
+      (error) => {
+        console.error('❌ [CONNECTIVITY] Listener error:', error);
+        if (errorCallback) errorCallback(error);
+      }
+    );
+    
+    return () => {
+      console.log('🧹 [CONNECTIVITY] Unsubscribing');
+      off(connectivityRef);
+    };
+  },
+
+  // 🔥 تحديث حالة الاتصال (للاستخدام من ESP32)
+  updateDeviceConnectivity: async (uid, deviceId) => {
+    try {
+      const connectivityRef = ref(database, getDevicePath(uid, deviceId, 'connectivity'));
+      const updateData = {
+        lastSeen: new Date().toISOString(),
+        lastUpdate: new Date().toISOString(),
+        status: 'online'
+      };
+      
+      await update(connectivityRef, updateData);
+      console.log('✅ [CONNECTIVITY] Status updated');
+      
+      return updateData;
+    } catch (error) {
+      console.error('❌ [CONNECTIVITY] Update error:', error);
+      throw error;
+    }
+  },
+
+  // 🔥 الحصول على حالة الاتصال الحالية
+  getDeviceConnectivity: async (uid, deviceId) => {
+    try {
+      const connectivityRef = ref(database, getDevicePath(uid, deviceId, 'connectivity'));
+      const snapshot = await get(connectivityRef);
+      const data = snapshot.val();
+      
+      console.log('🔍 [CONNECTIVITY] Raw data from Firebase:', { deviceId, data });
+      
+      if (!data || !data.lastSeen) {
+        return { isConnected: false, lastSeen: null, status: 'offline' };
+      }
+      
+      const lastSeenTime = new Date(data.lastSeen).getTime();
+      const currentTime = Date.now();
+      const timeDiff = currentTime - lastSeenTime;
+      const isConnected = timeDiff < 60000; // 60 ثانية
+      
+      console.log('⏱️ [CONNECTIVITY] Time calculation:', {
+        lastSeen: data.lastSeen,
+        lastSeenTime,
+        currentTime,
+        timeDiff,
+        isConnected
+      });
+      
+      return {
+        isConnected,
+        lastSeen: data.lastSeen,
+        status: isConnected ? 'online' : 'offline',
+        lastUpdate: data.lastUpdate,
+        minutesSinceLastSeen: Math.floor(timeDiff / 60000)
+      };
+    } catch (error) {
+      console.error('❌ [CONNECTIVITY] Fetch error:', error);
+      return { isConnected: false, lastSeen: null, status: 'error' };
+    }
+  },
+
+  // 🔥 مراقبة حالة جميع أجهزة المستخدم
+  listenToAllDevicesConnectivity: (uid, deviceIds, callback, errorCallback = null) => {
+    console.log('📡 [ALL DEVICES] Setting up connectivity for all devices:', deviceIds);
+    
+    const unsubscribers = deviceIds.map(deviceId => {
+      return this.listenToDeviceConnectivity(
+        uid,
+        deviceId,
+        (status) => {
+          callback(deviceId, status);
+        },
+        errorCallback
+      );
+    });
+    
+    return () => {
+      console.log('🧹 [ALL DEVICES] Unsubscribing from all devices');
+      unsubscribers.forEach(unsubscribe => unsubscribe());
+    };
   }
 };
 

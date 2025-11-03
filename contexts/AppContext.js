@@ -1,5 +1,5 @@
 // contexts/AppContext.js
-import React, { createContext, useState, useContext, useEffect } from 'react';
+import React, { createContext, useState, useContext, useEffect, useCallback, useRef } from 'react';
 import { firebaseService } from '../hooks/useFirebase';
 import { useAuth } from './AuthContext';
 
@@ -20,6 +20,21 @@ export function AppProvider({ children }) {
   const [currentFarm, setCurrentFarm] = useState(null);
   const [unitsConfig, setUnitsConfig] = useState({});
   const [isSettingsMode, setIsSettingsMode] = useState(false);
+  
+  // 🔥 الحالة الجديدة: يبدأ الهيدر مخفيًا
+  const [isHeaderCollapsed, setIsHeaderCollapsed] = useState(true);
+
+  // =============================================
+  // 🔥 نظام مراقبة حالة الأجهزة - الإضافات الجديدة
+  // =============================================
+  const [deviceConnectivity, setDeviceConnectivity] = useState({});
+  const [globalNotifications, setGlobalNotifications] = useState([]);
+
+  // 🔥 استخدام useRef لمنع التحديثات غير الضرورية
+  const lastSensorDataRef = useRef({});
+  const lastConnectivityDataRef = useRef({});
+  const activeSubscriptionsRef = useRef(new Set());
+  const notificationTimeoutRef = useRef({});
 
   // معلومات المستشعرات
   const SENSOR_INFO = {
@@ -84,6 +99,58 @@ export function AppProvider({ children }) {
       color: '#FFC107' 
     }
   };
+
+  // 🔥 الدالة الجديدة: تبديل حالة الهيدر
+  const toggleHeader = () => {
+    setIsHeaderCollapsed(!isHeaderCollapsed);
+  };
+
+  // 🔥 دالة لعرض الإشعارات العالمية - محسنة
+  const showGlobalNotification = useCallback((message, type = 'info') => {
+    const notificationId = `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    
+    const notification = {
+      id: notificationId,
+      message,
+      type,
+      timestamp: new Date().toISOString()
+    };
+    
+    setGlobalNotifications(prev => {
+      // 🔥 تحديد عدد الإشعارات المسموح به
+      const maxNotifications = 5;
+      const updatedNotifications = [...prev, notification];
+      
+      if (updatedNotifications.length > maxNotifications) {
+        return updatedNotifications.slice(updatedNotifications.length - maxNotifications);
+      }
+      
+      return updatedNotifications;
+    });
+    
+    // 🔥 تنظيف أي timeout سابق لنفس الرسالة (إن وجد)
+    if (notificationTimeoutRef.current[notificationId]) {
+      clearTimeout(notificationTimeoutRef.current[notificationId]);
+    }
+    
+    // إزالة الإشعار بعد 5 ثواني
+    notificationTimeoutRef.current[notificationId] = setTimeout(() => {
+      setGlobalNotifications(prev => 
+        prev.filter(n => n.id !== notificationId)
+      );
+      delete notificationTimeoutRef.current[notificationId];
+    }, 5000);
+  }, []);
+
+  // 🔥 الحصول على حالة جهاز معين
+  const getDeviceConnectivity = useCallback((deviceId) => {
+    return deviceConnectivity[deviceId] || { 
+      isConnected: false, 
+      lastSeen: null, 
+      status: 'unknown',
+      minutesSinceLastSeen: null
+    };
+  }, [deviceConnectivity]);
 
   // تحميل الإعدادات المحلية
   useEffect(() => {
@@ -217,7 +284,7 @@ export function AppProvider({ children }) {
     };
   }, [user, currentDevice, authLoading]);
 
-  // ✅ تحميل بيانات الجهاز الحالي - مع تحسينات التحميل
+  // ✅ تحميل بيانات الجهاز الحالي - مع تحسينات الأداء
   useEffect(() => {
     if (authLoading) {
       console.log('⏳ [DEVICE DATA] Auth still loading, waiting...');
@@ -225,13 +292,7 @@ export function AppProvider({ children }) {
     }
 
     if (!currentDevice || !firebaseService || !user) {
-      console.log('❌ [DEVICE DATA] Missing data for device subscription:', {
-        currentDevice,
-        firebaseService: !!firebaseService,
-        user: !!user,
-        userId: user?.uid,
-        authLoading
-      });
+      console.log('❌ [DEVICE DATA] Missing data for device subscription');
       return;
     }
 
@@ -242,12 +303,21 @@ export function AppProvider({ children }) {
       `devices/${currentDevice}`, 
       (snapshot) => {
         const data = snapshot.val();
+        
+        // 🔥 منع التحديثات غير الضرورية
+        const dataString = JSON.stringify(data);
+        if (dataString === lastSensorDataRef.current) {
+          console.log('🔄 [DEVICE DATA] Data unchanged, skipping update');
+          return;
+        }
+        
+        lastSensorDataRef.current = dataString;
         console.log('📊 [DEVICE DATA] Device data received:', data);
         
         setDeviceData(data);
         
         if (data && data.sensors) {
-          console.log('🎯 [DEVICE DATA] Sensor data updated:', data.sensors);
+          console.log('🎯 [DEVICE DATA] Sensor data updated');
           setSensorData(data.sensors);
         } else {
           console.log('⚠️ [DEVICE DATA] No sensor data in device data');
@@ -262,6 +332,7 @@ export function AppProvider({ children }) {
     return () => {
       console.log('🧹 [DEVICE DATA] Unsubscribing from device data');
       unsubscribe();
+      lastSensorDataRef.current = {};
     };
   }, [user, currentDevice, authLoading]);
 
@@ -333,7 +404,6 @@ export function AppProvider({ children }) {
       );
     };
 
-    // بدء الاشتراك بعد تأخير بسيط للتأكد من استقرار الحالة
     const timer = setTimeout(startSubscription, 100);
 
     return () => {
@@ -391,7 +461,6 @@ export function AppProvider({ children }) {
           }));
         } else {
           console.log('⚠️ [HISTORICAL] No data found for sensor:', currentSensor);
-          // ✅ الإصلاح: تعيين بيانات فارغة حتى لا تبقى البيانات القديمة
           setHistoricalData(prev => ({
             ...prev,
             [currentSensor]: {}
@@ -409,13 +478,221 @@ export function AppProvider({ children }) {
     };
   }, [user, currentDevice, currentSensor, authLoading]);
 
+  // =============================================
+  // 🔥 نظام مراقبة حالة الأجهزة - الاستخدام المحسن
+  // =============================================
+
+  // 🔥 مراقبة حالة الجهاز الحالي في الوقت الحقيقي - نسخة محسنة
+  useEffect(() => {
+    console.log('🎯 [DEVICE STATUS] useEffect triggered:', {
+      currentDevice,
+      user: user?.uid,
+      authLoading
+    });
+
+    if (authLoading) {
+      console.log('⏳ [DEVICE STATUS] Auth still loading, waiting...');
+      return;
+    }
+
+    if (!currentDevice || !firebaseService || !user) {
+      console.log('❌ [DEVICE STATUS] Missing data for status subscription');
+      return;
+    }
+
+    // 🔥 منع الاشتراك المزدوج
+    if (activeSubscriptionsRef.current.has(currentDevice)) {
+      console.log('⚠️ [DEVICE STATUS] Already subscribed to:', currentDevice);
+      return;
+    }
+
+    console.log('🚀 [DEVICE STATUS] Starting status subscription for:', currentDevice);
+
+    let unsubscribe = null;
+    let subscriptionActive = true;
+
+    const startStatusSubscription = () => {
+      if (!subscriptionActive) return;
+
+      activeSubscriptionsRef.current.add(currentDevice);
+      
+      unsubscribe = firebaseService.listenToDeviceConnectivity(
+        user.uid,
+        currentDevice,
+        (status) => {
+          if (!subscriptionActive) return;
+          
+          // 🔥 منع التحديثات غير الضرورية
+          const statusString = JSON.stringify(status);
+          const lastStatus = lastConnectivityDataRef.current[currentDevice];
+          
+          if (lastStatus === statusString) {
+            console.log('🔄 [DEVICE STATUS] Status unchanged for:', currentDevice);
+            return;
+          }
+          
+          lastConnectivityDataRef.current[currentDevice] = statusString;
+          
+          setDeviceConnectivity(prevState => {
+            const previousStatus = prevState[currentDevice];
+            const newState = {
+              ...prevState,
+              [currentDevice]: status
+            };
+
+            // 🔥 إشعار فوري عند تغيير الحالة
+            if (previousStatus?.isConnected !== status.isConnected) {
+              const message = status.isConnected 
+                ? `✅ الجهاز ${currentDevice} متصل الآن`
+                : `❌ الجهاز ${currentDevice} غير متصل`;
+              
+              showGlobalNotification(message, status.isConnected ? 'success' : 'error');
+            }
+
+            return newState;
+          });
+        },
+        (error) => {
+          if (!subscriptionActive) return;
+          console.error('❌ [DEVICE STATUS] Subscription error:', error);
+          activeSubscriptionsRef.current.delete(currentDevice);
+        }
+      );
+    };
+
+    const timer = setTimeout(startStatusSubscription, 200);
+
+    return () => {
+      console.log('🧹 [DEVICE STATUS] Cleaning up status subscription');
+      subscriptionActive = false;
+      activeSubscriptionsRef.current.delete(currentDevice);
+      
+      if (unsubscribe) {
+        unsubscribe();
+      }
+      clearTimeout(timer);
+    };
+  }, [user, currentDevice, authLoading, showGlobalNotification]);
+
+  // 🔥 مراقبة حالة جميع أجهزة المستخدم - نسخة محسنة
+  useEffect(() => {
+    if (!user || !firebaseService || authLoading || devicesList.length === 0) {
+      console.log('⏳ [ALL DEVICES STATUS] Skipping - missing dependencies');
+      return;
+    }
+
+    console.log('🎯 [ALL DEVICES STATUS] Monitoring all devices:', devicesList);
+
+    const unsubscribers = [];
+    const activeSubscriptions = new Set();
+
+    devicesList.forEach(deviceId => {
+      // 🔥 منع الاشتراك المزدوج في نفس الجهاز
+      if (activeSubscriptions.has(deviceId)) {
+        console.log('⚠️ [ALL DEVICES STATUS] Already subscribed to:', deviceId);
+        return;
+      }
+
+      activeSubscriptions.add(deviceId);
+
+      const unsubscribe = firebaseService.listenToDeviceConnectivity(
+        user.uid,
+        deviceId,
+        (status) => {
+          setDeviceConnectivity(prevState => {
+            const previousStatus = prevState[deviceId];
+            
+            // 🔥 منع التحديثات غير الضرورية
+            if (JSON.stringify(previousStatus) === JSON.stringify(status)) {
+              return prevState;
+            }
+
+            const newState = {
+              ...prevState,
+              [deviceId]: status
+            };
+
+            // 🔥 إشعار فوري عند تغيير الحالة لأي جهاز
+            if (previousStatus?.isConnected !== status.isConnected) {
+              const message = status.isConnected 
+                ? `✅ الجهاز ${deviceId} متصل الآن`
+                : `❌ الجهاز ${deviceId} غير متصل`;
+              
+              showGlobalNotification(message, status.isConnected ? 'success' : 'error');
+            }
+
+            return newState;
+          });
+        },
+        (error) => {
+          console.error(`❌ [ALL DEVICES STATUS] Error for device ${deviceId}:`, error);
+          activeSubscriptions.delete(deviceId);
+        }
+      );
+
+      unsubscribers.push(() => {
+        unsubscribe();
+        activeSubscriptions.delete(deviceId);
+      });
+    });
+
+    return () => {
+      console.log('🧹 [ALL DEVICES STATUS] Cleaning up all subscriptions');
+      unsubscribers.forEach(unsubscribe => unsubscribe());
+      activeSubscriptions.clear();
+    };
+  }, [user, devicesList, authLoading, showGlobalNotification]);
+
+  // 🔥 دالة لتحديث حالة الجهاز يدوياً
+  const refreshDeviceStatus = useCallback(async (deviceId = null) => {
+    const targetDevice = deviceId || currentDevice;
+    
+    if (!targetDevice || !firebaseService || !user) {
+      console.log('❌ [STATUS REFRESH] Cannot refresh: missing data');
+      return null;
+    }
+
+    console.log('🔄 [STATUS REFRESH] Manual refresh for device:', targetDevice);
+    
+    try {
+      const status = await firebaseService.getDeviceConnectivity(user.uid, targetDevice);
+      
+      console.log('✅ [STATUS REFRESH] Manual refresh result:', status);
+      
+      setDeviceConnectivity(prev => ({
+        ...prev,
+        [targetDevice]: status
+      }));
+      
+      return status;
+    } catch (error) {
+      console.error('❌ [STATUS REFRESH] Manual refresh failed:', error);
+      throw error;
+    }
+  }, [user, currentDevice]);
+
+  // 🔥 تنظيف الاشتراكات عند فك التثبيت
+  useEffect(() => {
+    return () => {
+      console.log('🧹 [CLEANUP] Cleaning up all subscriptions and timeouts');
+      
+      // تنظيف جميع الاشتراكات النشطة
+      activeSubscriptionsRef.current.clear();
+      
+      // تنظيف جميع الـ timeouts
+      Object.values(notificationTimeoutRef.current).forEach(timeout => {
+        clearTimeout(timeout);
+      });
+      notificationTimeoutRef.current = {};
+    };
+  }, []);
+
   // 🔍 إضافة useEffect تشخيصي للبيانات التاريخية
   useEffect(() => {
     console.log('📊 [HISTORICAL DIAGNOSTICS]', {
       currentSensor,
       availableSensors: Object.keys(historicalData),
-      currentSensorData: historicalData[currentSensor] ? Object.keys(historicalData[currentSensor]).length : 0,
-      allHistoricalData: historicalData
+      currentSensorData: historicalData[currentSensor] ? Object.keys(historicalData[currentSensor]).length : 0
     });
   }, [historicalData, currentSensor]);
 
@@ -431,10 +708,22 @@ export function AppProvider({ children }) {
   useEffect(() => {
     console.log('🔄 [SENSOR DATA] sensorData updated:', {
       count: Object.keys(sensorData).length,
-      sensors: Object.keys(sensorData),
-      values: sensorData
+      sensors: Object.keys(sensorData)
     });
   }, [sensorData]);
+
+  // 🔥 إضافة useEffect لمراقبة حالة الأجهزة
+  useEffect(() => {
+    console.log('🔌 [CONNECTIVITY SUMMARY] Device connectivity status:', {
+      currentDevice,
+      currentDeviceStatus: deviceConnectivity[currentDevice],
+      allDevices: Object.keys(deviceConnectivity).map(id => ({
+        device: id,
+        status: deviceConnectivity[id]?.isConnected ? 'online' : 'offline',
+        lastSeen: deviceConnectivity[id]?.lastSeen
+      }))
+    });
+  }, [deviceConnectivity, currentDevice]);
 
   // دوال إدارة المزارع
   const addFarm = async (deviceId) => {
@@ -444,7 +733,8 @@ export function AppProvider({ children }) {
     
     // منع التكرار
     if (farms.includes(trimmedId)) {
-      alert(language === 'ar' ? 'المزرعة موجودة بالفعل!' : 'Farm already exists!');
+      const message = language === 'ar' ? 'المزرعة موجودة بالفعل!' : 'Farm already exists!';
+      showGlobalNotification(message, 'warning');
       return;
     }
 
@@ -464,19 +754,19 @@ export function AppProvider({ children }) {
         const successMessage = language === 'ar' 
           ? `تم إضافة المزرعة ${trimmedId} بنجاح` 
           : `Farm ${trimmedId} added successfully`;
-        alert(successMessage);
+        showGlobalNotification(successMessage, 'success');
       } else {
         const errorMessage = language === 'ar'
           ? `الجهاز ${trimmedId} غير مصرح به أو لا ينتمي لحسابك`
           : `Device ${trimmedId} is not authorized or does not belong to your account`;
-        alert(errorMessage);
+        showGlobalNotification(errorMessage, 'error');
       }
     } catch (error) {
       console.error('Error adding farm:', error);
       const errorMessage = language === 'ar'
         ? 'حدث خطأ أثناء إضافة المزرعة'
         : 'Error adding farm';
-      alert(errorMessage);
+      showGlobalNotification(errorMessage, 'error');
     }
   };
 
@@ -655,6 +945,18 @@ export function AppProvider({ children }) {
     currentFarm,
     unitsConfig,
     isSettingsMode,
+    
+    // 🔥 الحالة الجديدة
+    isHeaderCollapsed,
+    toggleHeader,
+    
+    // 🔥 نظام مراقبة حالة الأجهزة
+    deviceConnectivity,
+    getDeviceConnectivity,
+    refreshDeviceStatus,
+    globalNotifications,
+    showGlobalNotification,
+    
     SENSOR_INFO,
     UNIT_TYPES,
     
@@ -678,7 +980,7 @@ export function AppProvider({ children }) {
     toggleSettingsMode,
     selectSensor,
     refreshUnits,
-    refreshHistoricalData // ✅ الإضافة: دالة تحديث البيانات التاريخية
+    refreshHistoricalData
   };
 
   return (
